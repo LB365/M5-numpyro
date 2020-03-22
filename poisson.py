@@ -76,8 +76,7 @@ def poisson_model(X, y=None):
     prob_0 = numpyro.sample('prob_0', fn=dist.Beta(2, 2))
     prob_1 = numpyro.sample('prob_1', fn=dist.Beta(2, 2))
     beta_0 = numpyro.sample('beta_0',fn=dist.Normal(0,3))
-    sigma_0 = numpyro.sample('sigma_0',fn=dist.Cauchy(1))
-    brk = numpyro.sample('brk',fn=dist.Normal(loc=750,scale=5))
+    sigma_0 = numpyro.sample('sigma_0',fn=dist.HalfCauchy(1))
     beta = numpyro.sample(name="beta",
                           sample_shape=(X.shape[1],),
                           fn=dist.TransformedDistribution(dist.Normal(loc=0.,
@@ -87,7 +86,7 @@ def poisson_model(X, y=None):
     mu = np.tensordot(X, beta, axes=(1, 0))
     prob_0 = np.clip(prob_0, a_min=jitter)
     prob_1 = np.clip(prob_1, a_min=jitter)
-    prob = np.where(np.arange(0,X.shape[0])<np.floor(brk),prob_0,prob_1)
+    prob = np.where(np.arange(0,X.shape[0])<750,prob_0,prob_1)
     return numpyro.sample('obs', fn=dist.ZeroInflatedPoisson(gate=prob, rate=mu / prob), obs=y)
 
 
