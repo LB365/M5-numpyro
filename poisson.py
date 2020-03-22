@@ -8,7 +8,7 @@ import jax.numpy as np
 from jax import lax, random, vmap
 from jax.nn import softmax
 import numpy as onp
-import numpyro;
+import numpyro
 
 numpyro.set_host_device_count(4)
 import numpyro.distributions as dist
@@ -72,8 +72,7 @@ def plot_sales_and_covariate(training_data):
 
 
 def poisson_model(X, y=None):
-    jitter = 10 ** -9
-    prob_0 = numpyro.sample('prob_0', fn=dist.Beta(2, 2))
+    jitter = 10 ** -25
     prob_1 = numpyro.sample('prob_1', fn=dist.Beta(2, 2))
     beta_0 = numpyro.sample('beta_0',fn=dist.Normal(0,3))
     sigma_0 = numpyro.sample('sigma_0',fn=dist.HalfCauchy(1))
@@ -83,10 +82,15 @@ def poisson_model(X, y=None):
                                                                       scale=1),
                                                           transforms=dist.transforms.AffineTransform(loc=beta_0,
                                                                                                      scale=sigma_0)))
-    mu = np.tensordot(X, beta, axes=(1, 0))
-    prob_0 = np.clip(prob_0, a_min=jitter)
     prob_1 = np.clip(prob_1, a_min=jitter)
-    prob = np.where(np.arange(0,X.shape[0])<750,prob_0,prob_1)
+    if y is not None:
+        brk = np.min(np.nonzero(np.diff(y, n=1)))
+        prob = np.where(np.arange(0,X.shape[0])<brk,1,prob_1)
+        mu_ = np.tensordot(X[brk:,:], beta, axes=(1, 0))
+        mu = np.hstack([jitter*np.ones(shape=brk),mu_])
+    else:
+        mu = np.tensordot(X, beta, axes=(1, 0))
+        prob = prob_1
     return numpyro.sample('obs', fn=dist.ZeroInflatedPoisson(gate=prob, rate=mu / prob), obs=y)
 
 
