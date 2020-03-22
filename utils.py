@@ -49,6 +49,10 @@ class M5Data:
         return self.sales_df["state_id"].value_counts().to_dict()
 
     @property
+    def state(self):
+        return self.sales_df["state_id"]
+
+    @property
     def event_types(self):
         return ["Cultural", "National", "Religious", "Sporting"]
 
@@ -138,7 +142,7 @@ class M5Data:
         assert x.shape == (self.num_days, 3)
         return x
 
-    def get_event(self, by_types=False):
+    def get_event(self, by_types=True):
         """
         Returns a tensor with length `num_days` indicating whether there are
         special events on a particular day.
@@ -152,7 +156,7 @@ class M5Data:
         if not by_types:
             event = self.calendar_df["event_type_1"].notnull().values[..., None]
             x = event
-            assert x.shape == (self.num_days, 1)
+            assert x.shape == (self.num_days, 1).astype(int)
             return x
 
         types = self.event_types
@@ -161,7 +165,7 @@ class M5Data:
         types2 = ["Cultural", "Religious"]
         event2[types2] = pd.get_dummies(self.calendar_df["event_type_2"])[types2].astype(bool)
         event2.fillna(False, inplace=True)
-        x = (event1.values | event2.values)
+        x = (event1.values | event2.values).astype(int)
         assert x.shape == (self.num_days, 4)
         return x
 
