@@ -7,7 +7,7 @@ import zipfile
 
 import numpy as np
 import pandas as pd
-
+from datetime import datetime
 
 class M5Data:
     """
@@ -62,6 +62,7 @@ class M5Data:
     def calendar_df(self):
         if self._calendar_df is None:
             self._calendar_df = self._read_csv("calendar.csv", index_col=0)
+            self._calendar_df.index = pd.to_datetime(self._calendar_df.index)
         return self._calendar_df
 
     @property
@@ -196,7 +197,9 @@ class M5Data:
         Returns a boolean 1D tensor with length `num_days` indicating if that day is
         Chrismas.
         """
-        christmas = self.calendar_df.index.str.endswith("12-25")[..., None]
+        cal = self.calendar_df.index.to_frame()
+        condition = (cal['date'].dt.day == 25) & (cal['date'].dt.month == 12)
+        christmas = condition.values[..., None]
         x = christmas.astype(int)
         assert x.shape == (self.num_days, 1)
         return x
