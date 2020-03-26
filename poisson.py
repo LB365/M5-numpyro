@@ -9,7 +9,7 @@ from jax import lax, random, vmap
 from jax.nn import softmax
 import numpy as onp
 import numpyro
-
+from functools import partial
 numpyro.set_host_device_count(4)
 import numpyro.distributions as dist
 from numpyro.diagnostics import autocorrelation, hpdi
@@ -28,11 +28,10 @@ def load_training_data(covariates=None):
     if covariates is None:
         covariates = ['month']
     m5 = M5Data()
-
-    sales = m5.get_sales()[0]
-
+    item = 1020
+    sales = m5.get_sales()[item]
+    col_snap = m5.states[m5.list_states[item]]
     calendar = m5.calendar_df.index.values[:sales.shape[0]]
-
     variables_set = ['price',
                      'christmas',
                      'dayofweek',
@@ -48,13 +47,15 @@ def load_training_data(covariates=None):
                  m5.get_snap,
                  m5.get_event]
     _ = dict(zip(variables_set, functions))
-
     selected_variables = {k: _[k] for k in covariates}
-
     data = [f() for f in list(selected_variables.values())]
     filtered_data = [x[:sales.shape[0], :] for x in data]
     training_data = dict(zip(covariates, filtered_data))
     training_data['sales'] = sales
+    if 'snap' in covariates:
+        training_data['snap'] = training_data['snap'][:,col_snap].reshape(-1,1)
+    if 'price' in covariates:
+        training_data['price'] = training_data['price'][:,item].reshape(-1,1)
     return calendar, training_data
 
 
@@ -108,13 +109,19 @@ def poisson_model_mask(X, X_dim, y=None):
     prob = numpyro.sample('prob', fn=dist.Beta(2, 2))
     beta = numpyro.sample('beta', fn=dist.Normal(0.2, 0.2), sample_shape=(len(X_dim),))
     sigma = numpyro.sample('sigma', fn=dist.HalfCauchy(0.5), sample_shape=(len(X_dim),))
-    var = {r"beta_{}".format(name): numpyro.sample(name=r"beta_{}".format(name),
-                                                   sample_shape=(dim,),
-                                                   fn=dist.TransformedDistribution(dist.Normal(loc=0.,
-                                                                                               scale=1),
-                                                                                   transforms=dist.transforms.AffineTransform(
-                                                                                       loc=beta[i],
-                                                                                       scale=sigma[i])))
+
+    def declare_param(i,name,dim):
+        if dim == 1:
+            return numpyro.deterministic(name=r"beta_{}".format(name), value=beta[i,np.newaxis])
+
+        else:
+            return numpyro.sample(name=r"beta_{}".format(name), sample_shape=(dim,),fn=dist.TransformedDistribution(
+                dist.Normal(loc=0., scale=1),
+                transforms=dist.transforms.AffineTransform(
+                loc=beta[i],
+                scale=sigma[i])))
+
+    var = {r"beta_{}".format(name): declare_param(i,name,dim)
            for i, (name, dim) in enumerate(X_dim.items())}
     beta_m = np.concatenate(list(var.values()), axis=0)
     prob = np.clip(prob, a_min=jitter)
@@ -134,7 +141,7 @@ def run_inference(model, inputs):
     rng_key = random.PRNGKey(0)
     mcmc.run(rng_key, **inputs, extra_fields=('potential_energy',))
     print(r'Summary for: {}'.format(model.__name__))
-    mcmc.print_summary()
+    mcmc.print_summary(exclude_deterministic=False)
     samples = mcmc.get_samples()
     return samples
 
@@ -159,7 +166,11 @@ def moments(forecast, alpha=None):
 def expectation_convolution(x, steps):
     x_ = onp.array(x)
     signal = onp.arange(0, steps)
-    computation = [onp.convolve(x_[:, i], signal,mode='same').reshape(-1, 1) for i in range(x.shape[1])]
+    if len(x_.shape)<=1:
+        computation = [onp.convolve(x_, signal, mode='same').reshape(-1, 1)]
+    else:
+        rng = x.shape[1]
+        computation = [onp.convolve(x_[:, i], signal, mode='same').reshape(-1, 1) for i in range(rng)]
     return onp.concatenate(computation, axis=1)
 
 def convolute(training_data,t_covariates,steps):
@@ -173,15 +184,15 @@ def convolute(training_data,t_covariates,steps):
 
 
 def main():
-    steps = 2
+    steps = 3
     variable = 'sales'
-    covariates = ['month', 'christmas', 'event']
-    t_covariates = ['christmas', 'event']
+    covariates = ['month', 'snap', 'event','price']
+    t_covariates = ['event','price']
     calendar, training_data = load_training_data(covariates=covariates)
 
     training_data = convolute(training_data,t_covariates,steps)
 
-    plot_sales_and_covariate(training_data, calendar)
+    # plot_sales_and_covariate(training_data, calendar)
     y = np.array(training_data[variable])
     training_data.pop(variable)
     X = np.hstack(list(training_data.values()))

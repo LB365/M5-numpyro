@@ -18,6 +18,8 @@ class M5Data:
     """
     quantiles = [0.005, 0.025, 0.165, 0.25, 0.5, 0.75, 0.835, 0.975, 0.995]
 
+    states = {"CA":0, "TX":1, "WI":2}
+
     def __init__(self, data_path=None):
         self.data_path = os.path.abspath("data") if data_path is None else data_path
         if not os.path.exists(self.data_path):
@@ -49,8 +51,8 @@ class M5Data:
         return self.sales_df["state_id"].value_counts().to_dict()
 
     @property
-    def state(self):
-        return self.sales_df["state_id"]
+    def list_states(self):
+        return self.sales_df["state_id"].values
 
     @property
     def event_types(self):
