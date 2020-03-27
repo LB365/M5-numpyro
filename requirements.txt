@@ -5,3 +5,5 @@ numpyro
 jax
 jaxlib
 pystan
+sklearn
+regex

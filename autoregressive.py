@@ -102,11 +102,11 @@ def main():
 
     # Ground truth values
 
-    ground_truth = {'beta':   [0.5, 0.5, 0.0, -0.005],
+    ground_truth = {'beta':   [0.5, 0.5, 0.0, -0.1],
                     'z_init': [1, 2, 0, 1],
                     'tau':0.2}
 
-    sample = 3000
+    sample = 2000
     init = len(ground_truth['z_init'])
     adj_sample = sample-init
     epsilon = onp.concatenate([onp.array(ground_truth['z_init']),
@@ -136,7 +136,7 @@ def main():
     mcmc.print_summary()
     samples = mcmc.get_samples()
 
-    #plot_inference(ground_truth,samples)
+    plot_inference(ground_truth,samples)
 
     rng_keys = random.split(random.PRNGKey(3), samples["tau"].shape[0])
     forecast_marginal = vmap(lambda rng_key, sample: forecast(
