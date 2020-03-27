@@ -28,7 +28,7 @@ def load_training_data(covariates=None):
     if covariates is None:
         covariates = ['month']
     m5 = M5Data()
-    item = 1020
+    item = 10
     sales = m5.get_sales()[item]
     col_snap = m5.states[m5.list_states[item]]
     calendar = m5.calendar_df.index.values[:sales.shape[0]]
@@ -103,6 +103,16 @@ def poisson_model(X, y=None):
         prob = prob_1
     return numpyro.sample('obs', fn=dist.ZeroInflatedPoisson(gate=prob, rate=mu / prob), obs=y)
 
+def scan_fn(n_coefs,beta,obs_init,obs):
+
+    def _body_fn(carry, x):
+        beta, z_prev = carry
+        z_mean = np.append(z_prev,x)
+        z_t = np.dot(beta,z_mean)
+        z_prev = z_mean[-(n_coefs-1):]
+        return (beta, z_prev), z_t
+
+    return lax.scan(_body_fn, (beta, obs_init), obs[n_coefs-1:-1])
 
 def poisson_model_mask(X, X_dim, y=None):
     jitter = 10 ** -25
@@ -125,11 +135,11 @@ def poisson_model_mask(X, X_dim, y=None):
            for i, (name, dim) in enumerate(X_dim.items())}
     beta_m = np.concatenate(list(var.values()), axis=0)
     prob = np.clip(prob, a_min=jitter)
+    mu = np.tensordot(X, beta_m, axes=(1, 0))
     if y is not None:
         brk = numpyro.deterministic('brk', np.min(np.nonzero(np.diff(y, n=1))))
     else:
         brk = X.shape[0]
-    mu = np.tensordot(X, beta_m, axes=(1, 0))
     with handlers.mask(np.arange(X.shape[0])[..., None] < brk):
         return numpyro.sample('obs', fn=dist.ZeroInflatedPoisson(gate=prob, rate=mu / prob), obs=y)
 
