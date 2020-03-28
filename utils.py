@@ -77,7 +77,7 @@ class M5Data:
             df = self._read_csv("sell_prices.csv")
             df["id"] = df.item_id + "_" + df.store_id + "_validation"
             df = pd.pivot_table(df, values="sell_price", index="id", columns="wm_yr_wk")
-            self._prices_df = df.fillna(0.).loc[self.sales_df.index]
+            self._prices_df = df.fillna(method='bfill',axis=1).loc[self.sales_df.index]
         return self._prices_df
 
     def listdir(self):
