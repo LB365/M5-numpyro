@@ -12,10 +12,10 @@ from functools import partial
 import numpyro.distributions as dist
 from numpyro.diagnostics import autocorrelation, hpdi
 from numpyro import handlers
-from numpyro.infer import MCMC, NUTS
+from numpyro.infer import MCMC, NUTS, SVI, SA
 from numpyro.infer import Predictive
 from itertools import product
-
+from datetime import datetime
 assert numpyro.__version__.startswith('0.2.4')
 numpyro.set_host_device_count(4)
 
@@ -131,11 +131,10 @@ def poisson_model_hierarchical(X, X_dim, y=None):
         var = {}
         for i, (name, dim) in enumerate(X_dim.items()):
             with numpyro.plate('dim', dim):
-                variable = numpyro.sample(name=r"beta_{}".format(name),
+                var[r"beta_{}".format(name)] = numpyro.sample(name=r"beta_{}".format(name),
                                           fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1),
                                                                           transforms=dist.transforms.AffineTransform(
                                                                               loc=beta[i], scale=sigma[i])))
-            var[r"beta_{}".format(name)] = variable
         beta_m = np.concatenate(list(var.values()), axis=0)
         mu = np.einsum('ijk,jk->ik', X, beta_m)
         # Break detection
@@ -155,12 +154,18 @@ def poisson_model_hierarchical(X, X_dim, y=None):
                 return numpyro.sample('obs', fn=dist.ZeroInflatedPoisson(gate=prob, rate=np.exp(Z) / prob), obs=y)
 
 
-def run_inference(model, inputs):
+def run_inference(model, inputs, method=None):
     num_samples = 500
-    nuts_kernel = NUTS(model)
-    mcmc = MCMC(nuts_kernel, num_warmup=500, num_samples=num_samples)
+    if method is None:
+        kernel = NUTS(model)
+    else:
+        kernel = SA(model)
+    tic = datetime.now()
+    mcmc = MCMC(kernel, num_warmup=500, num_samples=num_samples)
     rng_key = random.PRNGKey(0)
     mcmc.run(rng_key, **inputs, extra_fields=('potential_energy',))
+    toc = (datetime.now() - tic) / 60
+    print(toc)
     print(r'Summary for: {}'.format(model.__name__))
     mcmc.print_summary(exclude_deterministic=False)
     samples = mcmc.get_samples()
@@ -232,7 +237,7 @@ def transform(transformation_function, training_data, t_covariates, *args):
 def main():
     steps = 3
     n_days = 15
-    items = [246, 265, 35, 687]
+    items = range(10)
     variable = ['sales']  # Target variables
     covariates = ['month', 'snap', 'christmas', 'event', 'price']  # List of considered covariates
     ind_covariates = ['price', 'snap']  # Item-specific covariates
@@ -246,7 +251,7 @@ def main():
     training_data = transform(log_normalise, training_data, norm_covariates)
     training_data = transform(hump, training_data, hump_covariates, n_days)
 
-    plot_sales_and_covariate(training_data, calendar)
+    # plot_sales_and_covariate(training_data, calendar)
     y = np.array(training_data[variable[0]])
     X_i = np.stack([training_data[x] for x in ind_covariates], axis=1)
     X_i_dim = dict(zip(ind_covariates, [1 for x in ind_covariates]))
