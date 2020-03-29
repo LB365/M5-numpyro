@@ -1,3 +1,4 @@
+numba
 pandas
 numpy
 matplotlib
@@ -7,3 +8,5 @@ jaxlib
 pystan
 sklearn
 regex
+dask
+dask[dataframe]

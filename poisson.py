@@ -3,24 +3,24 @@ import matplotlib.pyplot as plt
 from numba import jit
 import os
 import pandas as pd
-from dbnomics import fetch_series
 import jax.numpy as np
 from jax import lax, random, vmap
 from jax.nn import softmax
 import numpy as onp
 import numpyro
 from functools import partial
-numpyro.set_host_device_count(4)
 import numpyro.distributions as dist
 from numpyro.diagnostics import autocorrelation, hpdi
 from numpyro import handlers
 from numpyro.infer import MCMC, NUTS
 from numpyro.infer import Predictive
+from itertools import product
 
 assert numpyro.__version__.startswith('0.2.4')
+numpyro.set_host_device_count(4)
 
 
-def load_training_data(covariates=None):
+def load_training_data(items, covariates=None):
     """
     Load sales for first item and covariates.
     :return:
@@ -28,10 +28,9 @@ def load_training_data(covariates=None):
     if covariates is None:
         covariates = ['month']
     m5 = M5Data()
-    item = 246
-    sales = m5.get_sales()[item]
-    col_snap = m5.states[m5.list_states[item]]
-    calendar = m5.calendar_df.index.values[:sales.shape[0]]
+    sales = m5.get_sales()[items]
+    col_snap = [m5.states[x] for x in m5.list_states[items]]
+    calendar = m5.calendar_df.index.values[:sales.shape[-1]]
     variables_set = ['price',
                      'christmas',
                      'dayofweek',
@@ -49,13 +48,13 @@ def load_training_data(covariates=None):
     _ = dict(zip(variables_set, functions))
     selected_variables = {k: _[k] for k in covariates}
     data = [f() for f in list(selected_variables.values())]
-    filtered_data = [x[:sales.shape[0], :] for x in data]
+    filtered_data = [x[:sales.shape[-1], :] for x in data]
     training_data = dict(zip(covariates, filtered_data))
-    training_data['sales'] = sales
+    training_data['sales'] = sales.T
     if 'snap' in covariates:
-        training_data['snap'] = training_data['snap'][:,col_snap].reshape(-1,1)
+        training_data['snap'] = training_data['snap'][:, col_snap]
     if 'price' in covariates:
-        training_data['price'] = training_data['price'][:,item].reshape(-1,1)
+        training_data['price'] = training_data['price'][:, items]
     return calendar, training_data
 
 
@@ -73,83 +72,91 @@ def plot_sales_and_covariate(training_data, calendar):
 
 
 def plot_fit(forecasts, y, calendar):
-    fig, ax = plt.subplots()
-    ax.plot(calendar, y, label='sales')
-    ax.plot(calendar, forecasts['mean'], label='prediction')
-    ax.fill_between(calendar, forecasts['lower'], forecasts['upper'], alpha=0.2, color='red')
+    n_plots = y.shape[1]
+    n_rows = int(onp.sqrt(n_plots)) + 1
+    n_cols = int(n_plots // n_rows) + 1
+    if y.shape == 1:
+        n_rows, n_cols = 1, None
+    fig, ax = plt.subplots(nrows=n_rows, ncols=n_cols)
+    for i in range(y.shape[1]):
+        if y.shape[1] == 1:
+            ax.plot(calendar, y[:, i], label='sales')
+            ax.plot(calendar, forecasts['mean'][:, i], label='prediction')
+            ax.fill_between(calendar, forecasts['lower'][:, i], forecasts['upper'][:, i], alpha=0.2, color='red')
+        else:
+            ax[i // n_cols, i % n_cols].plot(calendar, y[:, i], label='sales')
+            ax[i // n_cols, i % n_cols].plot(calendar, forecasts['mean'][:, i], label='prediction')
+            ax[i // n_cols, i % n_cols].fill_between(calendar, forecasts['lower'][:, i], forecasts['upper'][:, i],
+                                                     alpha=0.2, color='red')
     fig.legend()
     plt.show()
+
 
 def plot_inference(sample):
     n_plots = len(sample)
     n_rows = int(onp.sqrt(n_plots)) + 1
     n_cols = int(n_plots // n_rows) + 1
-    fig,ax = plt.subplots(nrows=n_rows,ncols=n_cols)
-    for i,(key, value) in enumerate(sample.items()):
-        if len(value.shape) > 1:
-            for j in range(0,value.shape[1]):
-                ax[i // n_cols][i % n_cols].hist(sample[key][:,j],bins=100,label=r'{}[{}]'.format(key,str(j)))
-                ax[i // n_cols][i % n_cols].axvline(np.mean(sample[key][j]),color='black')
-        else:
-            ax[i // n_cols][i % n_cols].hist(sample[key], bins=100)
-            ax[i // n_cols][i % n_cols].axvline(np.mean(sample[key]),color='black')
-        ax[i // n_cols][i % n_cols].set_title(r'Parameter: {}'.format(key))
+    fig, ax = plt.subplots(nrows=n_rows, ncols=n_cols)
+    for i, (key, value) in enumerate(sample.items()):
+        iterator = list(product(*[range(x) for x in value.shape[1:]]))
+        for t in iterator:
+            ax[i // n_cols, i % n_cols].hist(value[(slice(0, value.shape[0]), *t)], bins=100,
+                                             label=r'{}{}'.format(key, str(t)))
+        ax[i // n_cols, i % n_cols].set_title(r'Parameter: {}'.format(key))
     fig.legend()
     plt.show()
 
 
-def scan_fn(alpha, z_init, dz):
+def scan_fn_h(alpha, z_init, dz):
     def _body_fn(carry, x):
         z_prev = carry
-        z_t = alpha * z_prev + (np.ones(1) - alpha) * x
-        z_prev = z_t[-1]
+        z_t = np.multiply(alpha, z_prev) + np.multiply((np.ones(alpha.shape) - alpha), x)
+        z_prev = z_t.reshape(-1, 1)[:, -1]
         return z_prev, z_t
+
     return lax.scan(_body_fn, z_init, dz)
 
-def poisson_model_mask(X, X_dim, autoregressive, y=None):
-    # Seasonality and regression effects
-    jitter = 10 ** -25
-    prob = numpyro.sample('prob', fn=dist.Beta(2., 2.))
-    beta = numpyro.sample('beta', fn=dist.Normal(0., 1.), sample_shape=(len(X_dim),))
-    sigma = numpyro.sample('sigma', fn=dist.HalfNormal(0.4), sample_shape=(len(X_dim),))
-    def declare_param(i,name,dim):
-        if dim == 1:
-            return numpyro.deterministic(name=r"beta_{}".format(name), value=beta[i,np.newaxis])
-        else:
-            return numpyro.sample(name=r"beta_{}".format(name), sample_shape=(dim,),fn=dist.TransformedDistribution(
-                dist.Normal(loc=0., scale=1),
-                transforms=dist.transforms.AffineTransform(
-                loc=beta[i],
-                scale=sigma[i])))
 
-    var = {r"beta_{}".format(name): declare_param(i,name,dim)
-           for i, (name, dim) in enumerate(X_dim.items())}
-    beta_m = np.concatenate(list(var.values()), axis=0)
-    prob = np.clip(prob, a_min=jitter)
-    mu = np.tensordot(X, beta_m, axes=(1, 0))
-    # Break detection
-    if y is not None:
-        brk = numpyro.deterministic('brk', np.min(np.nonzero(np.diff(y, n=1))))
-    else:
-        brk = X.shape[0]
-    # Autoregressive component
-    if autoregressive:
-        alpha = numpyro.sample(name="alpha",fn=dist.TransformedDistribution(dist.Normal(loc=0.,scale=1.),
-                               transforms=dist.transforms.AffineTransform(loc=0.5,scale=0.2)))
-        z_init = numpyro.sample(name='z_init', fn=dist.Normal(loc=0.,scale=1.))
-        z_last, zs_exp = scan_fn(alpha, z_init, mu)
-        Z = zs_exp[:,0]
-    else:
-        Z = mu
-    # Inference
-    l,_ = X.shape
-    with numpyro.plate('y',l):
-        with handlers.mask(np.arange(l)[..., None] < brk):
-            return numpyro.sample('obs', fn=dist.ZeroInflatedPoisson(gate=prob, rate=np.exp(Z) / prob), obs=y)
+def poisson_model_hierarchical(X, X_dim, y=None):
+    # Seasonality and regression effects
+    l, n_cov, n_items = X.shape
+    # Plate over items
+    with numpyro.plate('items', n_items):
+        prob = numpyro.sample('prob', fn=dist.Beta(2., 2.))
+        # Plate over variables
+        with numpyro.plate('n_cov', len(X_dim)):
+            beta = numpyro.sample('beta', fn=dist.Normal(0., 1.))
+            sigma = numpyro.sample('sigma', fn=dist.HalfNormal(0.4))
+        # Plate over variable dimension
+        var = {}
+        for i, (name, dim) in enumerate(X_dim.items()):
+            with numpyro.plate('dim', dim):
+                variable = numpyro.sample(name=r"beta_{}".format(name),
+                                          fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1),
+                                                                          transforms=dist.transforms.AffineTransform(
+                                                                              loc=beta[i], scale=sigma[i])))
+            var[r"beta_{}".format(name)] = variable
+        beta_m = np.concatenate(list(var.values()), axis=0)
+        mu = np.einsum('ijk,jk->ik', X, beta_m)
+        # Break detection
+        if y is not None:
+            brk = numpyro.deterministic('brk', (np.diff(y, n=1, axis=0) == 0).argmin(axis=0))
+        else:
+            brk = X.shape[0]
+        # Autoregressive component
+        alpha = numpyro.sample(name="alpha", fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1.),
+                                                                             transforms=dist.transforms.AffineTransform(
+                                                                                 loc=0.5, scale=0.10)))
+        z_init = numpyro.sample(name='z_init', fn=dist.Normal(loc=0., scale=1.))
+        _, Z = scan_fn_h(alpha, z_init, mu)
+        # Inference
+        with numpyro.plate('y', l):
+            with handlers.mask(np.arange(l)[..., None] < brk):
+                return numpyro.sample('obs', fn=dist.ZeroInflatedPoisson(gate=prob, rate=np.exp(Z) / prob), obs=y)
 
 
 def run_inference(model, inputs):
-    num_samples = 4500
+    num_samples = 500
     nuts_kernel = NUTS(model)
     mcmc = MCMC(nuts_kernel, num_warmup=500, num_samples=num_samples)
     rng_key = random.PRNGKey(0)
@@ -170,7 +177,7 @@ def posterior_predictive(model, samples, inputs):
 def moments(forecast, alpha=None):
     if alpha is None:
         alpha = 0.95
-    mean = np.mean(forecast, axis=0)
+    mean = onp.mean(forecast, axis=0)
     hpdi_0, hpdi_1 = hpdi(forecast, prob=alpha)
     names = ['lower', 'mean', 'upper']
     values = [hpdi_0, mean, hpdi_1]
@@ -181,7 +188,7 @@ def expectation_convolution(x, steps):
     x_ = onp.array(x)
     signal_ = onp.arange(steps)
     signal_inv = - onp.arange(steps)[::-1]
-    signal = np.append(signal_,signal_inv)
+    signal = np.append(signal_, signal_inv)
     if len(x_.shape) <= 1:
         computation = [onp.convolve(x_, signal, mode='same').reshape(-1, 1)]
     else:
@@ -189,12 +196,18 @@ def expectation_convolution(x, steps):
         computation = [onp.convolve(x_[:, i], signal, mode='same').reshape(-1, 1) for i in range(rng)]
     return onp.concatenate(computation, axis=1)
 
-def log_normalise(x):
-    X = np.log(x)
-    return (X - np.mean(X))/np.std(X)
 
-def hump(x,n_days):
-    hump_signal = np.square(np.concatenate([np.arange(0,n_days),np.arange(0,n_days-1)[::-1]]))
+def log_normalise(x):
+    tol = 0.001
+    mask = (x.std(axis=0) < tol)
+    random_price = onp.random.rand(x.shape[0])
+    random_price_mask = onp.dot(random_price.reshape((-1,1)),mask.reshape((-1,1)).T)
+    X = onp.log(x) + random_price_mask
+    return (X - onp.mean(X, axis=0)) / onp.std(X, axis=0)
+
+
+def hump(x, n_days):
+    hump_signal = np.square(np.concatenate([np.arange(0, n_days), np.arange(0, n_days - 1)[::-1]]))
     if len(x.shape) <= 1:
         computation_ = [onp.convolve(x, hump_signal, mode='same').reshape(-1, 1)]
     else:
@@ -202,56 +215,61 @@ def hump(x,n_days):
         computation_ = [onp.convolve(x[:, i], hump_signal, mode='same').reshape(-1, 1) for i in range(rng)]
     computation = onp.concatenate(computation_, axis=1)
     rescaler = np.max(computation)
-    return 1/rescaler * np.concatenate(computation_,axis=1)
+    return 1 / rescaler * np.concatenate(computation_, axis=1)
 
 
-
-def transform(transformation_function, training_data, t_covariates,*args):
-    def _body_transform(name,value,t_covariates,*args):
+def transform(transformation_function, training_data, t_covariates, *args):
+    def _body_transform(name, value, t_covariates, *args):
         if name in t_covariates:
             return transformation_function(value, *args)
         else:
             return value
-    return  {name: _body_transform(name,value,t_covariates,*args)
-                     for name, value in training_data.items()}
+
+    return {name: _body_transform(name, value, t_covariates, *args)
+            for name, value in training_data.items()}
 
 
 def main():
     steps = 3
     n_days = 15
-    variable = 'sales'
-    covariates = ['month', 'snap', 'christmas', 'event', 'price']
-    t_covariates = ['event', 'christmas']
-    norm_covariates = ['price']
-    hump_covariates = ['month']
-    calendar, training_data = load_training_data(covariates=covariates)
+    items = [246, 265, 35, 687]
+    variable = ['sales']  # Target variables
+    covariates = ['month', 'snap', 'christmas', 'event', 'price']  # List of considered covariates
+    ind_covariates = ['price', 'snap']  # Item-specific covariates
+    common_covariates = set(covariates).difference(ind_covariates)  # List of non item-specific covariates
+    t_covariates = ['event', 'christmas']  # List of transformed covariates
+    norm_covariates = ['price']  # List of normalised covariates
+    hump_covariates = ['month']  # List of convoluted covariates
+    calendar, training_data = load_training_data(items=items, covariates=covariates)
 
-    training_data = transform(expectation_convolution,training_data, t_covariates, steps)
+    training_data = transform(expectation_convolution, training_data, t_covariates, steps)
     training_data = transform(log_normalise, training_data, norm_covariates)
-    training_data = transform(hump, training_data, hump_covariates,n_days)
+    training_data = transform(hump, training_data, hump_covariates, n_days)
 
     plot_sales_and_covariate(training_data, calendar)
-    y = np.array(training_data[variable])
-    training_data.pop(variable)
-    X = np.hstack(list(training_data.values()))
-    X_dim = dict(zip(covariates, [x.shape[1] for x in training_data.values()]))
+    y = np.array(training_data[variable[0]])
+    X_i = np.stack([training_data[x] for x in ind_covariates], axis=1)
+    X_i_dim = dict(zip(ind_covariates, [1 for x in ind_covariates]))
+    X_c = np.repeat(np.hstack([training_data[i] for i in common_covariates])[:, :, np.newaxis], repeats=len(items),
+                    axis=2)
+    X_c_dim = dict(zip(common_covariates, [training_data[x].shape[-1] for x in common_covariates]))
+    X = np.concatenate([X_c, X_i], axis=1)
+    X_dim = {**X_c_dim, **X_i_dim}
     inputs = {'X': X,
               'X_dim': X_dim,
-              'autoregressive':True,
               'y': y}
-    samples_mask = run_inference(poisson_model_mask, inputs)
+    samples = run_inference(poisson_model_hierarchical, inputs)
 
-    plot_inference(samples_mask)
+    # plot_inference(samples_mask)
 
     inputs.pop('y')
-    trace_mask = posterior_predictive(poisson_model_mask, samples_mask, inputs)
-    forecasts_mask = moments(trace_mask)
-    plot_fit(forecasts_mask, y, calendar)
+    trace = posterior_predictive(poisson_model_hierarchical, samples, inputs)
+    forecasts = moments(trace)
+    plot_fit(forecasts, y, calendar)
 
 
 if __name__ == '__main__':
     main()
-
 
 #######################
 # Decommissioned models
@@ -278,3 +296,53 @@ if __name__ == '__main__':
 #         mu = np.tensordot(X, beta, axes=(1, 0))
 #         prob = prob_1
 #     return numpyro.sample('obs', fn=dist.ZeroInflatedPoisson(gate=prob, rate=mu / prob), obs=y)
+
+# def scan_fn(alpha, z_init, dz):
+#     def _body_fn(carry, x):
+#         z_prev = carry
+#         z_t = alpha * z_prev + (np.ones(1) - alpha) * x
+#         z_prev = z_t[-1]
+#         return z_prev, z_t
+#     return lax.scan(_body_fn, z_init, dz)
+#
+#
+# def poisson_model_mask(X, X_dim, autoregressive, y=None):
+#     # Seasonality and regression effects
+#     jitter = 10 ** -25
+#     prob = numpyro.sample('prob', fn=dist.Beta(2., 2.))
+#     beta = numpyro.sample('beta', fn=dist.Normal(0., 1.), sample_shape=(len(X_dim),))
+#     sigma = numpyro.sample('sigma', fn=dist.HalfNormal(0.4), sample_shape=(len(X_dim),))
+#     def declare_param(i,name,dim):
+#         if dim == 1:
+#             return numpyro.deterministic(name=r"beta_{}".format(name), value=beta[i,np.newaxis])
+#         else:
+#             return numpyro.sample(name=r"beta_{}".format(name), sample_shape=(dim,),fn=dist.TransformedDistribution(
+#                 dist.Normal(loc=0., scale=1),
+#                 transforms=dist.transforms.AffineTransform(
+#                 loc=beta[i],
+#                 scale=sigma[i])))
+#
+#     var = {r"beta_{}".format(name): declare_param(i,name,dim)
+#            for i, (name, dim) in enumerate(X_dim.items())}
+#     beta_m = np.concatenate(list(var.values()), axis=0)
+#     prob = np.clip(prob, a_min=jitter)
+#     mu = np.tensordot(X, beta_m, axes=(1, 0))
+#     # Break detection
+#     if y is not None:
+#         brk = numpyro.deterministic('brk', np.min(np.nonzero(np.diff(y, n=1))))
+#     else:
+#         brk = X.shape[0]
+#     # Autoregressive component
+#     if autoregressive:
+#         alpha = numpyro.sample(name="alpha",fn=dist.TransformedDistribution(dist.Normal(loc=0.,scale=1.),
+#                                transforms=dist.transforms.AffineTransform(loc=0.5,scale=0.15)))
+#         z_init = numpyro.sample(name='z_init', fn=dist.Normal(loc=0.,scale=1.))
+#         z_last, zs_exp = scan_fn(alpha, z_init, mu)
+#         Z = zs_exp[:,0]
+#     else:
+#         Z = mu
+#     # Inference
+#     l,_ = X.shape
+#     with numpyro.plate('y',l):
+#         with handlers.mask(np.arange(l)[..., None] < brk):
+#             return numpyro.sample('obs', fn=dist.ZeroInflatedPoisson(gate=prob, rate=np.exp(Z) / prob), obs=y)
