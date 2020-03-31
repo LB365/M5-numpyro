@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 from numba import jit
 import os
 import pandas as pd
-from dbnomics import fetch_series
 import jax.numpy as np
 from jax import lax, random, vmap
 from jax.nn import softmax
