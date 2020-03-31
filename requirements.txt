@@ -5,8 +5,3 @@ matplotlib
 numpyro
 jax
 jaxlib
-pystan
-sklearn
-regex
-dask
-dask[dataframe]
