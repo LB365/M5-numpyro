@@ -1,4 +1,6 @@
 from utils import M5Data
+import logging
+import sys
 import matplotlib.pyplot as plt
 from numba import jit
 import os
@@ -12,14 +14,23 @@ from functools import partial
 import numpyro.distributions as dist
 from numpyro.diagnostics import autocorrelation, hpdi
 from numpyro import handlers
+from numpyro.util import fori_loop
+from numpyro.infer.util import init_to_prior
 from numpyro.infer import MCMC, NUTS, SVI, SA
+from numpyro.contrib.autoguide import (AutoContinuousELBO,
+                                       AutoLaplaceApproximation,
+                                       AutoDiagonalNormal,
+                                       AutoBNAFNormal,
+                                       AutoMultivariateNormal)
+from numpyro.optim import Adam
 from numpyro.infer import Predictive
 from itertools import product
 from datetime import datetime
-
+from metrics import Metrics
 assert numpyro.__version__.startswith('0.2.4')
 numpyro.set_host_device_count(4)
-
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
 
 def load_training_data(items, covariates=None):
     """
@@ -38,14 +49,16 @@ def load_training_data(items, covariates=None):
                      'dayofmonth',
                      'month',
                      'snap',
-                     'event']
+                     'event',
+                     'trend']
     functions = [m5.get_prices,
                  m5.get_christmas,
                  m5.get_dummy_day_of_week,
                  m5.get_dummy_day_of_month,
                  m5.get_dummy_month_of_year,
                  m5.get_snap,
-                 m5.get_event]
+                 m5.get_event,
+                 m5.get_trend]
     _ = dict(zip(variables_set, functions))
     selected_variables = {k: _[k] for k in covariates}
     data = [f() for f in list(selected_variables.values())]
@@ -72,7 +85,7 @@ def plot_sales_and_covariate(training_data, calendar):
     plt.show()
 
 
-def plot_fit(forecasts, y, calendar):
+def plot_fit(forecasts, hit_rate, y, calendar):
     n_plots = y.shape[1]
     n_rows = int(onp.sqrt(n_plots)) + 1
     n_cols = int(n_plots // n_rows) + 1
@@ -90,6 +103,7 @@ def plot_fit(forecasts, y, calendar):
             ax[i // n_cols, i % n_cols].fill_between(calendar, forecasts['lower'][:, i], forecasts['upper'][:, i],
                                                      alpha=0.2, color='red')
     fig.legend()
+    fig.text(60, .025, r'hit_rate={0:.1f}'.format(hit_rate))
     plt.show()
 
 
@@ -124,20 +138,22 @@ def poisson_model_hierarchical(X, X_dim, y=None):
     # Seasonality and regression effects
     l, n_, n_items = X.shape
     if X.shape[-1] > 1:
-        beta_meta = numpyro.sample('beta_meta', fn=dist.Normal(0, 5))
-        sigma_meta = numpyro.sample('sigma_meta', fn=dist.HalfNormal(5))
+        beta_meta = numpyro.sample('beta_meta', fn=dist.Normal(0, 0.5))
+        sigma_meta = numpyro.sample('sigma_meta', fn=dist.HalfNormal(0.4))
     else:
         beta_meta = numpyro.deterministic('beta_meta', value=np.array(0.))
-        sigma_meta = numpyro.deterministic('sigma_meta', value=np.array(5))
+        sigma_meta = numpyro.deterministic('sigma_meta', value=np.array(0.4))
     # Plate over items
     with numpyro.plate('items', n_items):
+        const = numpyro.sample('const',fn=dist.Normal(0,5.))
+        C = np.repeat(const[None,...],repeats=l,axis=0)
         prob = numpyro.sample('prob', fn=dist.Beta(2., 2.))
         # Plate over variables
         with numpyro.plate('n_cov', n_cov):
             beta = numpyro.sample('beta', fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1),
                                                                           transforms=dist.transforms.AffineTransform(
                                                                               loc=beta_meta, scale=sigma_meta)))
-            sigma = numpyro.sample('sigma', fn=dist.HalfNormal(0.4))
+            sigma = numpyro.sample('sigma', fn=dist.HalfNormal(0.3))
         # Plate over variable dimension
         beta_long = np.repeat(beta, values, axis=0)
         sigma_long = np.repeat(sigma, values, axis=0)
@@ -151,8 +167,8 @@ def poisson_model_hierarchical(X, X_dim, y=None):
         alpha = numpyro.sample(name="alpha", fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1.),
                                                                              transforms=dist.transforms.AffineTransform(
                                                                                  loc=0.5, scale=0.1)))
-        z_init = numpyro.sample(name='z_init', fn=dist.Normal(loc=0., scale=5.))
-        _, Z = scan_fn_h(alpha, z_init, mu)
+        _, Z = scan_fn_h(alpha, np.zeros(shape=(n_items,)), mu)
+        Z += C
         # Break detection
         if y is not None:
             brk = numpyro.deterministic('brk', (np.diff(y, n=1, axis=0) == 0).argmin(axis=0))
@@ -165,20 +181,33 @@ def poisson_model_hierarchical(X, X_dim, y=None):
 
 
 def run_inference(model, inputs, method=None):
-    num_samples = 2500
+    num_samples = 5000
     if method is None:
+        # NUTS
+        logger.info('NUTS sampling')
         kernel = NUTS(model)
+        mcmc = MCMC(kernel, num_warmup=500, num_samples=num_samples)
+        rng_key = random.PRNGKey(0)
+        mcmc.run(rng_key, **inputs, extra_fields=('potential_energy',))
+        logger.info(r'MCMC summary for: {}'.format(model.__name__))
+        mcmc.print_summary(exclude_deterministic=False)
+        samples = mcmc.get_samples()
     else:
-        kernel = SA(model)
-    tic = datetime.now()
-    mcmc = MCMC(kernel, num_warmup=500, num_samples=num_samples)
-    rng_key = random.PRNGKey(0)
-    mcmc.run(rng_key, **inputs, extra_fields=('potential_energy',))
-    toc = (datetime.now() - tic) / 60
-    print(toc)
-    print(r'Summary for: {}'.format(model.__name__))
-    mcmc.print_summary(exclude_deterministic=False)
-    samples = mcmc.get_samples()
+        #SVI
+        logger.info('Guide generation...')
+        rng_key = random.PRNGKey(0)
+        guide = AutoBNAFNormal(model=model,init_strategy=init_to_prior())
+        logger.info('Optimizer generation...')
+        optim = Adam(0.05)
+        logger.info('SVI generation...')
+        svi = SVI(model, guide, optim, AutoContinuousELBO(), **inputs)
+        init_state = svi.init(rng_key)
+        logger.info('Scan...')
+        state, loss = lax.scan(lambda x,i: svi.update(x), init_state, np.zeros(1000))
+        params = svi.get_params(state)
+        samples = guide.sample_posterior(random.PRNGKey(1), params, (1000,))
+        logger.info(r'SVI summary for: {}'.format(model.__name__))
+        numpyro.diagnostics.print_summary(samples, prob=0.89, group_by_chain=False)
     return samples
 
 
@@ -187,33 +216,6 @@ def posterior_predictive(model, samples, inputs):
     rng_key = random.PRNGKey(0)
     forecast = predictive(rng_key=rng_key, **inputs)['obs']
     return forecast
-
-class Metrics():
-
-    def __init__(self,**kwargs):
-        self.alpha = 0.95
-        self._moments = None
-        self._hit_rate = None
-        self._data = None
-        self._trace = None
-        for name,value in kwargs.items():
-            setattr(self,name,value)
-
-    def moments(self,forecast):
-        if self._moments is None:
-            mean = onp.mean(forecast, axis=0)
-            hpdi_0, hpdi_1 = hpdi(forecast, prob=alpha)
-            names = ['lower', 'mean', 'upper']
-            values = [hpdi_0, mean, hpdi_1]
-            self._moments = dict(zip(names, values))
-        return self._moments
-
-    def hit_rate(self,forecast,y):
-        m = self.moments(forecast)
-        hit = (y > m['lower']) & (y < m['upper'])
-        return hit.sum()/hit.size
-
-
 
 def expectation_convolution(x, steps):
     x_ = onp.array(x)
@@ -233,7 +235,7 @@ def log_normalise(x):
     mask = (x.std(axis=0) < tol)
     random_price = onp.random.rand(x.shape[0])
     random_price_mask = onp.dot(random_price.reshape((-1, 1)), mask.reshape((-1, 1)).T)
-    X = onp.log(x) + 0 * random_price_mask
+    X = onp.log(x) + random_price_mask
     return (X - onp.mean(X, axis=0)) / onp.std(X, axis=0)
 
 
@@ -261,18 +263,19 @@ def transform(transformation_function, training_data, t_covariates, *args):
 
 
 def main():
+    logger.info('Main starting')
     steps = 5
     n_days = 15
-    items = range(5)
+    items = [246] # range(245,)
     variable = ['sales']  # Target variables
-    covariates = ['month', 'snap', 'christmas', 'event', 'price']  # List of considered covariates
+    covariates = ['month', 'snap', 'christmas', 'event', 'price', 'trend']  # List of considered covariates
     ind_covariates = ['price', 'snap']  # Item-specific covariates
     common_covariates = set(covariates).difference(ind_covariates)  # List of non item-specific covariates
     t_covariates = ['event', 'christmas']  # List of transformed covariates
-    norm_covariates = ['price']  # List of normalised covariates
+    norm_covariates = ['price','trend']  # List of normalised covariates
     hump_covariates = ['month']  # List of convoluted covariates
+    logger.info('Loading data')
     calendar, training_data = load_training_data(items=items, covariates=covariates)
-
     training_data = transform(expectation_convolution, training_data, t_covariates, steps)
     training_data = transform(log_normalise, training_data, norm_covariates)
     training_data = transform(hump, training_data, hump_covariates, n_days)
@@ -281,7 +284,8 @@ def main():
     y = np.array(training_data[variable[0]])
     X_i = np.stack([training_data[x] for x in ind_covariates], axis=1)
     X_i_dim = dict(zip(ind_covariates, [1 for x in ind_covariates]))
-    X_c = np.repeat(np.hstack([training_data[i] for i in common_covariates])[:, :, np.newaxis], repeats=len(items),
+    X_c = np.repeat(np.hstack([training_data[i] for i in common_covariates])[:, :, np.newaxis],
+                    repeats=len(items),
                     axis=2)
     X_c_dim = dict(zip(common_covariates, [training_data[x].shape[-1] for x in common_covariates]))
     X = np.concatenate([X_c, X_i], axis=1)
@@ -292,14 +296,29 @@ def main():
     inputs = {'X': X,
               'X_dim': X_dim,
               'y': y}
-    samples = run_inference(poisson_model_hierarchical, inputs)
+    logger.info('Inference')
+    samples = run_inference(model=poisson_model_hierarchical,
+                            inputs=inputs,
+                            method='SVI')
+    samples_hmc = run_inference(model=poisson_model_hierarchical,
+                            inputs=inputs)
+
 
     plot_inference(samples)
 
     inputs.pop('y')
     trace = posterior_predictive(poisson_model_hierarchical, samples, inputs)
-    forecasts = moments(trace)
-    plot_fit(forecasts, y, calendar)
+
+    metric_data = {'trace':trace,
+                   'actual':y,
+                   'alpha':0.95}
+
+    m = Metrics(**metric_data)
+
+    forecasts = m.moments
+    hit_rate = m.hit_rate
+    plot_fit(forecasts,hit_rate, y, calendar)
+    print(r'Hit rate={0:0.2f}'.format(hit_rate))
 
 
 if __name__ == '__main__':

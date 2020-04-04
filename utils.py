@@ -10,6 +10,9 @@ import pandas as pd
 from datetime import datetime
 import pickle
 
+def trend(s_datetime):
+    return  1 + (((s_datetime.values.astype(np.int64)) // 10**9 - 1296259200) // 86400)
+
 def pickle_path(name):
     return r'data/{}.pkl'.format(name)
 
@@ -236,6 +239,15 @@ class M5Data:
         condition = (cal['date'].dt.day == 25) & (cal['date'].dt.month == 12)
         christmas = condition.values[..., None]
         x = christmas.astype(int)
+        assert x.shape == (self.num_days, 1)
+        return x
+
+    def get_trend(self):
+        """
+        Returns a boolean 1D tensor with length `num_days` indicating if that day is
+        Chrismas.
+        """
+        x = trend(self.calendar_df.index)[...,None]
         assert x.shape == (self.num_days, 1)
         return x
 
