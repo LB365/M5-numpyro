@@ -188,15 +188,31 @@ def posterior_predictive(model, samples, inputs):
     forecast = predictive(rng_key=rng_key, **inputs)['obs']
     return forecast
 
+class Metrics():
 
-def moments(forecast, alpha=None):
-    if alpha is None:
-        alpha = 0.95
-    mean = onp.mean(forecast, axis=0)
-    hpdi_0, hpdi_1 = hpdi(forecast, prob=alpha)
-    names = ['lower', 'mean', 'upper']
-    values = [hpdi_0, mean, hpdi_1]
-    return dict(zip(names, values))
+    def __init__(self,**kwargs):
+        self.alpha = 0.95
+        self._moments = None
+        self._hit_rate = None
+        self._data = None
+        self._trace = None
+        for name,value in kwargs.items():
+            setattr(self,name,value)
+
+    def moments(self,forecast):
+        if self._moments is None:
+            mean = onp.mean(forecast, axis=0)
+            hpdi_0, hpdi_1 = hpdi(forecast, prob=alpha)
+            names = ['lower', 'mean', 'upper']
+            values = [hpdi_0, mean, hpdi_1]
+            self._moments = dict(zip(names, values))
+        return self._moments
+
+    def hit_rate(self,forecast,y):
+        m = self.moments(forecast)
+        hit = (y > m['lower']) & (y < m['upper'])
+        return hit.sum()/hit.size
+
 
 
 def expectation_convolution(x, steps):
@@ -217,7 +233,7 @@ def log_normalise(x):
     mask = (x.std(axis=0) < tol)
     random_price = onp.random.rand(x.shape[0])
     random_price_mask = onp.dot(random_price.reshape((-1, 1)), mask.reshape((-1, 1)).T)
-    X = onp.log(x) + random_price_mask
+    X = onp.log(x) + 0 * random_price_mask
     return (X - onp.mean(X, axis=0)) / onp.std(X, axis=0)
 
 
@@ -245,9 +261,9 @@ def transform(transformation_function, training_data, t_covariates, *args):
 
 
 def main():
-    steps = 3
+    steps = 5
     n_days = 15
-    items = range(246,256)
+    items = range(5)
     variable = ['sales']  # Target variables
     covariates = ['month', 'snap', 'christmas', 'event', 'price']  # List of considered covariates
     ind_covariates = ['price', 'snap']  # Item-specific covariates
@@ -261,7 +277,7 @@ def main():
     training_data = transform(log_normalise, training_data, norm_covariates)
     training_data = transform(hump, training_data, hump_covariates, n_days)
 
-    # plot_sales_and_covariate(training_data, calendar)
+    plot_sales_and_covariate(training_data, calendar)
     y = np.array(training_data[variable[0]])
     X_i = np.stack([training_data[x] for x in ind_covariates], axis=1)
     X_i_dim = dict(zip(ind_covariates, [1 for x in ind_covariates]))
@@ -269,13 +285,16 @@ def main():
                     axis=2)
     X_c_dim = dict(zip(common_covariates, [training_data[x].shape[-1] for x in common_covariates]))
     X = np.concatenate([X_c, X_i], axis=1)
+    #Aggregation
+    X = np.median(X,axis=-1)[...,None]
+    y = np.sum(y,axis=-1)[...,None]
     X_dim = {**X_c_dim, **X_i_dim}
     inputs = {'X': X,
               'X_dim': X_dim,
               'y': y}
     samples = run_inference(poisson_model_hierarchical, inputs)
 
-    # plot_inference(samples_mask)
+    plot_inference(samples)
 
     inputs.pop('y')
     trace = posterior_predictive(poisson_model_hierarchical, samples, inputs)
