@@ -15,18 +15,20 @@ import numpyro.distributions as dist
 from numpyro.diagnostics import autocorrelation, hpdi
 from numpyro import handlers
 from numpyro.util import fori_loop
-from numpyro.infer.util import init_to_prior
+from numpyro.infer.util import init_to_prior, init_to_median
 from numpyro.infer import MCMC, NUTS, SVI, SA
 from numpyro.contrib.autoguide import (AutoContinuousELBO,
                                        AutoLaplaceApproximation,
                                        AutoDiagonalNormal,
                                        AutoBNAFNormal,
-                                       AutoMultivariateNormal)
+                                       AutoMultivariateNormal,
+                                       AutoLowRankMultivariateNormal)
 from numpyro.optim import Adam
 from numpyro.infer import Predictive
 from itertools import product
 from datetime import datetime
 from metrics import Metrics
+import seaborn as sns
 assert numpyro.__version__.startswith('0.2.4')
 numpyro.set_host_device_count(4)
 logging.basicConfig(level=logging.INFO)
@@ -121,6 +123,32 @@ def plot_inference(sample):
     fig.legend()
     plt.show()
 
+def plot_parameter_by_inference(sample_svi,sample_hmc,parameter):
+    method = ['NUTS', 'SVI']
+    _ = sample_hmc[parameter], sample_svi[parameter]
+    samples_dict = dict(zip(method, _))
+    n_plots = _[0].size // _[0].shape[0]
+    fig, ax = plt.subplots(nrows=n_plots, sharex=True)
+    if n_plots > 1:
+        iterator = list(product(*[range(x) for x in _[0].shape[1:]]))
+        for i, t in enumerate(iterator):
+            for method, sample in samples_dict.items():
+                s = np.array(sample[(slice(0, sample.shape[0]), *t)])
+                sns.kdeplot(s, ax=ax[i], label=r'{}: {}{}'.format(method, parameter, str(t)))
+                ax[i].axvline(onp.mean(s), color='black')
+                ax[i].legend()
+                ax[i].set_title(r'Parameter: {}'.format(parameter))
+    else:
+        for method, sample in samples_dict.items():
+            s = np.array(sample[(slice(0, sample.shape[0]), 0)])
+            sns.kdeplot(s, ax=ax, label=r'{}: {}'.format(method, parameter))
+            ax.axvline(onp.mean(s), color='black')
+        ax.set_title(r'Parameter: {}'.format(parameter))
+        ax.legend()
+    plt.show()
+
+
+
 
 def scan_fn_h(alpha, z_init, dz):
     def _body_fn(carry, x):
@@ -181,9 +209,9 @@ def poisson_model_hierarchical(X, X_dim, y=None):
 
 
 def run_inference(model, inputs, method=None):
-    num_samples = 5000
     if method is None:
         # NUTS
+        num_samples = 5000
         logger.info('NUTS sampling')
         kernel = NUTS(model)
         mcmc = MCMC(kernel, num_warmup=500, num_samples=num_samples)
@@ -196,9 +224,9 @@ def run_inference(model, inputs, method=None):
         #SVI
         logger.info('Guide generation...')
         rng_key = random.PRNGKey(0)
-        guide = AutoBNAFNormal(model=model,init_strategy=init_to_prior())
+        guide = AutoLowRankMultivariateNormal(model=model,init_strategy=init_to_median())
         logger.info('Optimizer generation...')
-        optim = Adam(0.05)
+        optim = Adam(0.1)
         logger.info('SVI generation...')
         svi = SVI(model, guide, optim, AutoContinuousELBO(), **inputs)
         init_state = svi.init(rng_key)
@@ -207,7 +235,7 @@ def run_inference(model, inputs, method=None):
         params = svi.get_params(state)
         samples = guide.sample_posterior(random.PRNGKey(1), params, (1000,))
         logger.info(r'SVI summary for: {}'.format(model.__name__))
-        numpyro.diagnostics.print_summary(samples, prob=0.89, group_by_chain=False)
+        numpyro.diagnostics.print_summary(samples, prob=0.90, group_by_chain=False)
     return samples
 
 
@@ -266,7 +294,7 @@ def main():
     logger.info('Main starting')
     steps = 5
     n_days = 15
-    items = [246] # range(245,)
+    items = range(246,255)
     variable = ['sales']  # Target variables
     covariates = ['month', 'snap', 'christmas', 'event', 'price', 'trend']  # List of considered covariates
     ind_covariates = ['price', 'snap']  # Item-specific covariates
@@ -280,7 +308,7 @@ def main():
     training_data = transform(log_normalise, training_data, norm_covariates)
     training_data = transform(hump, training_data, hump_covariates, n_days)
 
-    plot_sales_and_covariate(training_data, calendar)
+    # plot_sales_and_covariate(training_data, calendar)
     y = np.array(training_data[variable[0]])
     X_i = np.stack([training_data[x] for x in ind_covariates], axis=1)
     X_i_dim = dict(zip(ind_covariates, [1 for x in ind_covariates]))
@@ -290,8 +318,8 @@ def main():
     X_c_dim = dict(zip(common_covariates, [training_data[x].shape[-1] for x in common_covariates]))
     X = np.concatenate([X_c, X_i], axis=1)
     #Aggregation
-    X = np.median(X,axis=-1)[...,None]
-    y = np.sum(y,axis=-1)[...,None]
+    # X = np.median(X,axis=-1)[...,None]
+    # y = np.sum(y,axis=-1)[...,None]
     X_dim = {**X_c_dim, **X_i_dim}
     inputs = {'X': X,
               'X_dim': X_dim,
@@ -303,6 +331,9 @@ def main():
     samples_hmc = run_inference(model=poisson_model_hierarchical,
                             inputs=inputs)
 
+    plot_parameter_by_inference(sample_hmc=samples_hmc,sample_svi=samples,parameter='alpha')
+    plot_parameter_by_inference(sample_hmc=samples_hmc, sample_svi=samples, parameter='beta')
+    plot_parameter_by_inference(sample_hmc=samples_hmc, sample_svi=samples, parameter='sigma')
 
     plot_inference(samples)
 
