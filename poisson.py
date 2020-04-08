@@ -266,8 +266,7 @@ def run_inference(model, inputs, method=None):
         num_samples = 1500
         logger.info('NUTS sampling')
         kernel = NUTS(model)
-        mcmc = MCMC(kernel, num_warmup=500, num_samples=num_samples,
-                    num_chains=4,chain_method='parallel',progress_bar=True)
+        mcmc = MCMC(kernel, num_warmup=500, num_samples=num_samples)
         rng_key = random.PRNGKey(0)
         mcmc.run(rng_key, **inputs, extra_fields=('potential_energy',))
         logger.info(r'MCMC summary for: {}'.format(model.__name__))
