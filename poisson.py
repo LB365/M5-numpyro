@@ -33,6 +33,8 @@ assert numpyro.__version__.startswith('0.2.4')
 numpyro.set_host_device_count(4)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
+from sklearn.cluster import SpectralCoclustering
+from sklearn.metrics import consensus_score
 
 def load_training_data(items, covariates=None):
     """
@@ -207,14 +209,65 @@ def poisson_model_hierarchical(X, X_dim, y=None):
             with handlers.mask(np.arange(l)[..., None] < brk):
                 return numpyro.sample('obs', fn=dist.ZeroInflatedPoisson(gate=prob, rate=np.exp(Z) / prob), obs=y)
 
+def normal_model_hierarchical(X, X_dim, y=None):
+    values = list(X_dim.values())
+    n_cov = len(values)
+    # Seasonality and regression effects
+    l, n_, n_items = X.shape
+    if X.shape[-1] > 1:
+        beta_meta = numpyro.sample('beta_meta', fn=dist.Normal(0, 0.5))
+        sigma_meta = numpyro.sample('sigma_meta', fn=dist.HalfNormal(0.4))
+    else:
+        beta_meta = numpyro.deterministic('beta_meta', value=np.array(0.))
+        sigma_meta = numpyro.deterministic('sigma_meta', value=np.array(0.4))
+    # Plate over items
+    with numpyro.plate('items', n_items):
+        sigma_sto = numpyro.sample('sigma_sto',fn=dist.HalfNormal(scale=1))
+        const = numpyro.sample('const',fn=dist.HalfCauchy(20))
+        C = np.repeat(const[None,...],repeats=l,axis=0)
+        # Plate over variables
+        with numpyro.plate('n_cov', n_cov):
+            beta = numpyro.sample('beta', fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1),
+                                                                          transforms=dist.transforms.AffineTransform(
+                                                                              loc=beta_meta, scale=sigma_meta)))
+            sigma = numpyro.sample('sigma', fn=dist.HalfNormal(0.3))
+        # Plate over variable dimension
+        beta_long = np.repeat(beta, values, axis=0)
+        sigma_long = np.repeat(sigma, values, axis=0)
+        with numpyro.plate('covariates',n_):
+            beta_covariates = numpyro.sample(name='beta_covariates',
+                                             fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1),
+                                                                             transforms=dist.transforms.AffineTransform(
+                                                                                 loc=beta_long, scale=sigma_long)))
+        mu = np.einsum('ijk,jk->ik', X, beta_covariates)
+        # Autoregressive component
+        alpha = numpyro.sample(name="alpha", fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1.),
+                                                                             transforms=dist.transforms.AffineTransform(
+                                                                                 loc=0.5, scale=0.1)))
+        _, Z = scan_fn_h(alpha, np.zeros(shape=(n_items,)), mu)
+        # Break detection
+        if y is not None:
+            brk = numpyro.deterministic('brk', (np.diff(y, n=1, axis=0) == 0).argmin(axis=0))
+        else:
+            brk = X.shape[0]
+        # Inference
+        with numpyro.plate('y', l):
+            with handlers.mask(np.arange(l)[..., None] < brk):
+                return numpyro.sample('obs', fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1),
+                                                                             transforms=dist.transforms.AffineTransform(
+                                                                             loc=C * np.exp(Z), scale=C * sigma_sto)
+                                                                             ),
+                                      obs=y)
+
 
 def run_inference(model, inputs, method=None):
     if method is None:
         # NUTS
-        num_samples = 5000
+        num_samples = 1500
         logger.info('NUTS sampling')
         kernel = NUTS(model)
-        mcmc = MCMC(kernel, num_warmup=500, num_samples=num_samples)
+        mcmc = MCMC(kernel, num_warmup=500, num_samples=num_samples,
+                    num_chains=4,chain_method='parallel',progress_bar=True)
         rng_key = random.PRNGKey(0)
         mcmc.run(rng_key, **inputs, extra_fields=('potential_energy',))
         logger.info(r'MCMC summary for: {}'.format(model.__name__))
@@ -224,9 +277,9 @@ def run_inference(model, inputs, method=None):
         #SVI
         logger.info('Guide generation...')
         rng_key = random.PRNGKey(0)
-        guide = AutoLowRankMultivariateNormal(model=model,init_strategy=init_to_median())
+        guide = AutoBNAFNormal(model=model,init_strategy=init_to_median())
         logger.info('Optimizer generation...')
-        optim = Adam(0.1)
+        optim = Adam(0.04)
         logger.info('SVI generation...')
         svi = SVI(model, guide, optim, AutoContinuousELBO(), **inputs)
         init_state = svi.init(rng_key)
@@ -289,12 +342,27 @@ def transform(transformation_function, training_data, t_covariates, *args):
     return {name: _body_transform(name, value, t_covariates, *args)
             for name, value in training_data.items()}
 
+def cluster(y, X, n_clusters):
+    y_ = onp.array(y,dtype='float64')
+    mask = (onp.diff(y, n=1, axis=0) == 0).argmin(axis=0)
+    for i in range(mask.size):
+        y_[range(mask[i]),i] = np.nan
+    corr = pd.DataFrame(y_).corr(method='kendall')
+    model = SpectralCoclustering(n_clusters=n_clusters)
+    model.fit(corr)
+    clusters = [model.get_indices(i)[0] for i in range(n_clusters)]
+    fn_by_cluster = lambda x,fn,**kwargs: np.concatenate([fn(x[...,rng],axis=-1,**kwargs)[...,np.newaxis]
+                                                          for rng in clusters],axis=-1)
+    y_ = fn_by_cluster(y,np.sum)
+    X_ = fn_by_cluster(X,np.mean)
+    return y_, X_, clusters
+
 
 def main():
     logger.info('Main starting')
     steps = 5
     n_days = 15
-    items = range(246,255)
+    items = range(0,50)
     variable = ['sales']  # Target variables
     covariates = ['month', 'snap', 'christmas', 'event', 'price', 'trend']  # List of considered covariates
     ind_covariates = ['price', 'snap']  # Item-specific covariates
@@ -310,35 +378,28 @@ def main():
 
     # plot_sales_and_covariate(training_data, calendar)
     y = np.array(training_data[variable[0]])
+
     X_i = np.stack([training_data[x] for x in ind_covariates], axis=1)
     X_i_dim = dict(zip(ind_covariates, [1 for x in ind_covariates]))
-    X_c = np.repeat(np.hstack([training_data[i] for i in common_covariates])[:, :, np.newaxis],
+    X_c = np.repeat(np.hstack([training_data[i] for i in common_covariates])[..., np.newaxis],
                     repeats=len(items),
                     axis=2)
     X_c_dim = dict(zip(common_covariates, [training_data[x].shape[-1] for x in common_covariates]))
     X = np.concatenate([X_c, X_i], axis=1)
-    #Aggregation
-    # X = np.median(X,axis=-1)[...,None]
-    # y = np.sum(y,axis=-1)[...,None]
+    # Aggregation
+    y,X,clusters = cluster(y,X,5)
     X_dim = {**X_c_dim, **X_i_dim}
     inputs = {'X': X,
               'X_dim': X_dim,
               'y': y}
     logger.info('Inference')
-    samples = run_inference(model=poisson_model_hierarchical,
-                            inputs=inputs,
-                            method='SVI')
-    samples_hmc = run_inference(model=poisson_model_hierarchical,
-                            inputs=inputs)
-
-    plot_parameter_by_inference(sample_hmc=samples_hmc,sample_svi=samples,parameter='alpha')
-    plot_parameter_by_inference(sample_hmc=samples_hmc, sample_svi=samples, parameter='beta')
-    plot_parameter_by_inference(sample_hmc=samples_hmc, sample_svi=samples, parameter='sigma')
-
-    plot_inference(samples)
+    # samples = run_inference(model=normal_model_hierarchical,
+    #                         inputs=inputs,
+    #                         method='SVI')
+    samples_hmc = run_inference(model=normal_model_hierarchical,inputs=inputs)
 
     inputs.pop('y')
-    trace = posterior_predictive(poisson_model_hierarchical, samples, inputs)
+    trace = posterior_predictive(normal_model_hierarchical, samples_hmc, inputs)
 
     metric_data = {'trace':trace,
                    'actual':y,
