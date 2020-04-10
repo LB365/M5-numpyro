@@ -35,7 +35,7 @@ class M5Data:
     states = {"CA":0, "TX":1, "WI":2}
 
     def __init__(self, data_path=None):
-        self.data_path = os.path.abspath("data") if data_path is None else data_path
+        self.data_path = os.path.abspath("../data") if data_path is None else data_path
         if not os.path.exists(self.data_path):
             raise FileNotFoundError(f"There is no folder '{self.data_path}'.")
 
@@ -379,6 +379,47 @@ class M5Data:
         assert df.shape[0] == prediction.shape[0] * 2
         df.iloc[:prediction.shape[0], :] = prediction
         df.to_csv(filename)
+
+def load_training_data(items, covariates=None):
+    """
+    Load sales for first item and covariates.
+    :return:
+    """
+    if covariates is None:
+        covariates = ['month']
+    data_path = r"data/"
+    m5 = M5Data(data_path)
+    sales = m5.get_sales()[items]
+    col_snap = [m5.states[x] for x in m5.list_states[items]]
+    calendar = m5.calendar_df.index.values[:sales.shape[-1]]
+    variables_set = ['price',
+                     'christmas',
+                     'dayofweek',
+                     'dayofmonth',
+                     'month',
+                     'snap',
+                     'event',
+                     'trend']
+    functions = [m5.get_prices,
+                 m5.get_christmas,
+                 m5.get_dummy_day_of_week,
+                 m5.get_dummy_day_of_month,
+                 m5.get_dummy_month_of_year,
+                 m5.get_snap,
+                 m5.get_event,
+                 m5.get_trend]
+    _ = dict(zip(variables_set, functions))
+    selected_variables = {k: _[k] for k in covariates}
+    data = [f() for f in list(selected_variables.values())]
+    filtered_data = [x[:sales.shape[-1], :] for x in data]
+    training_data = dict(zip(covariates, filtered_data))
+    training_data['sales'] = sales.T
+    if 'snap' in covariates:
+        training_data['snap'] = training_data['snap'][:, col_snap]
+    if 'price' in covariates:
+        training_data['price'] = training_data['price'][:, items]
+    return calendar, training_data
+
 
 
 # class BatchDataLoader:
