@@ -19,6 +19,7 @@ from pyro.infer.reparam import LocScaleReparam, StableReparam
 from pyro.ops.tensor_utils import periodic_cumsum, periodic_repeat, periodic_features
 from pyro.ops.stats import quantile
 import matplotlib.pyplot as plt
+numpyro.set_host_device_count(4)
 logger = logging.getLogger()
 
 def jax_to_torch(x):
@@ -27,7 +28,6 @@ def jax_to_torch(x):
 
 def load_input():
     assert numpyro.__version__.startswith('0.2.4')
-    numpyro.set_host_device_count(4)
     logger.info('Main starting')
     steps = 2
     n_days = 15
