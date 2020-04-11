@@ -236,7 +236,7 @@ class M5Data:
         Chrismas.
         """
         cal = self.calendar_df.index.to_frame()
-        condition = (cal['date'].dt.day == 25) & (cal['date'].dt.month == 12)
+        condition = (cal['date'].dt.day == 24) & (cal['date'].dt.month == 12)
         christmas = condition.values[..., None]
         x = christmas.astype(int)
         assert x.shape == (self.num_days, 1)
