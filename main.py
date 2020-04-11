@@ -31,13 +31,13 @@ def load_input():
     logger.info('Main starting')
     steps = 2
     n_days = 15
-    items = range(0,150)
+    items = range(0,50)
     variable = ['sales']  # Target variables
-    covariates = ['month', 'snap', 'christmas', 'event', 'price', 'trend']  # List of considered covariates
+    covariates = ['month', 'snap', 'christmas', 'event', 'price']  # List of considered covariates
     ind_covariates = ['price', 'snap']  # Item-specific covariates
     common_covariates = set(covariates).difference(ind_covariates)  # List of non item-specific covariates
     t_covariates = ['event', 'christmas']  # List of transformed covariates
-    norm_covariates = ['price','trend']  # List of normalised covariates
+    norm_covariates = ['price']  # List of normalised covariates
     hump_covariates = ['month']  # List of convoluted covariates
     logger.info('Loading data')
     calendar, training_data = load_training_data(items=items, covariates=covariates)
@@ -53,7 +53,7 @@ def load_input():
     X_c_dim = dict(zip(common_covariates, [training_data[x].shape[-1] for x in common_covariates]))
     X = np.concatenate([X_c, X_i], axis=1)
     # Aggregation
-    y,X,clusters = cluster(y,X,10)
+    y,X,clusters = cluster(y,X,2)
     X_dim = {**X_c_dim, **X_i_dim}
     return {'X': X,
             'X_dim': X_dim,
@@ -64,15 +64,14 @@ def main(pyro_backend=None):
     logger.info('Inference')
     if pyro_backend is None:
         samples_hmc = run_inference(model=normal_model_hierarchical,inputs=inputs)
-        inputs.pop('y')
         trace = posterior_predictive(normal_model_hierarchical, samples_hmc, inputs)
         metric_data = {'trace':trace,
-                       'actual':y,
+                       'actual':inputs['y'],
                        'alpha':0.95}
         m = Metrics(**metric_data)
         forecasts = m.moments
         hit_rate = m.hit_rate
-        plot_fit(forecasts,hit_rate, y, calendar)
+        plot_fit(forecasts,hit_rate, inputs['y'], calendar)
         print(r'Hit rate={0:0.2f}'.format(hit_rate))
     else:
         covariates, covariate_dim, data = inputs.values()
@@ -109,4 +108,4 @@ def main(pyro_backend=None):
 
 
 if __name__ == '__main__':
-    main(pyro_backend=True)
+    main(pyro_backend=None)

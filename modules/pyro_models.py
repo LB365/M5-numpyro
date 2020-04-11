@@ -117,7 +117,8 @@ class Model4(ForecastingModel):
         drift_scale = pyro.sample("drift_scale", dist.LogNormal(-20, 5))
         with pyro.plate("item", data_dim, dim=-2):
             bias = pyro.sample("bias", dist.Normal(5.0, 10.0))
-            weight = pyro.sample("weight", dist.Normal(0.0, 5).expand((feature_dim,)))
+            with pyro.plate('features',feature_dim,dim=-1):
+                weight = pyro.sample("weight", dist.Normal(0.0, 5))
 
             # We'll sample a time-global scale parameter outside the time plate,
             # then time-local iid noise inside the time plate.

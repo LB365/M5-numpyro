@@ -82,11 +82,11 @@ def normal_model_hierarchical(X, X_dim, y=None):
     # Plate over items
     with numpyro.plate('items', n_items):
         sigma_sto = numpyro.sample('sigma_sto',fn=dist.HalfNormal(scale=1))
-        const = numpyro.sample('const',fn=dist.HalfCauchy(20))
-        C = np.repeat(const[None,...],repeats=l,axis=0)
+        # const = numpyro.sample('const',fn=dist.HalfCauchy(20))
+        # C = np.repeat(const[None,...],repeats=l,axis=0)
         # Plate over variables
         with numpyro.plate('n_cov', n_cov):
-            beta = numpyro.sample('beta', fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1),
+            beta = numpyro.sample('beta', fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1.),
                                                                           transforms=dist.transforms.AffineTransform(
                                                                               loc=beta_meta, scale=sigma_meta)))
             sigma = numpyro.sample('sigma', fn=dist.HalfNormal(0.3))
@@ -98,13 +98,14 @@ def normal_model_hierarchical(X, X_dim, y=None):
                                              fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1),
                                                                              transforms=dist.transforms.AffineTransform(
                                                                                  loc=beta_long, scale=sigma_long)))
-        mu = np.einsum('ijk,jk->ik', X, beta_covariates)
+        mu = np.matmul(X.transpose((-1,-3,-2)),beta_covariates.T[...,None]).sum(-1).T
         # Autoregressive component
-        alpha = numpyro.sample(name="alpha", fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1.),
-                                                                             transforms=dist.transforms.AffineTransform(
-                                                                                 loc=0.5, scale=0.1)))
-        _, Z = scan_fn_h(alpha, np.zeros(shape=(n_items,)), mu)
-        Z = mu + C
+        # alpha = numpyro.sample(name="alpha", fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1.),
+        #                                                                      transforms=dist.transforms.AffineTransform(
+        #                                                                          loc=0.6, scale=0.3)))
+        # _, Z = scan_fn_h(alpha, np.zeros(shape=(n_items,)), mu)
+        motion = numpyro.sample('motion',fn=dist.GaussianRandomWalk(0.05,num_steps=l))
+        Z = mu + motion.T
         # Break detection
         if y is not None:
             brk = numpyro.deterministic('brk', (np.diff(y, n=1, axis=0) == 0).argmin(axis=0))
@@ -115,10 +116,8 @@ def normal_model_hierarchical(X, X_dim, y=None):
             with handlers.mask(np.arange(l)[..., None] < brk):
                 return numpyro.sample('obs', fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1),
                                                                              transforms=dist.transforms.AffineTransform(
-                                                                             loc=np.exp(Z), scale=sigma_sto,
-                                                                                 domain=dist.constraints.positive)
-                                                                             ),
-                                      obs=y)
+                                                                             loc=np.exp(Z), scale=sigma_sto)
+                                                                             ),obs=y)
 
 #######################
 # Decommissioned models

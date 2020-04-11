@@ -55,7 +55,8 @@ def run_inference(model, inputs, method=None):
 
 
 def posterior_predictive(model, samples, inputs):
+    inputs_ = {k:inputs[k] for k in set(inputs.keys()).difference(['y'])}
     predictive = Predictive(model=model, posterior_samples=samples)
     rng_key = random.PRNGKey(0)
-    forecast = predictive(rng_key=rng_key, **inputs)['obs']
+    forecast = predictive(rng_key=rng_key, **inputs_)['obs']
     return forecast

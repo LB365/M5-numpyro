@@ -25,11 +25,11 @@ def expectation_convolution(x, steps, two_sided):
 
 
 def log_normalise(x):
-    tol = 0.001
-    mask = (x.std(axis=0) < tol)
-    random_price = onp.random.rand(x.shape[0])
-    random_price_mask = onp.dot(random_price.reshape((-1, 1)), mask.reshape((-1, 1)).T)
-    X = onp.log(x) + random_price_mask
+    # tol = 0.001
+    # mask = (x.std(axis=0) < tol)
+    # random_price = onp.random.rand(x.shape[0])
+    # random_price_mask = onp.dot(random_price.reshape((-1, 1)), mask.reshape((-1, 1)).T)
+    X = onp.log(x)
     return (X - onp.mean(X, axis=0)) / onp.std(X, axis=0)
 
 
@@ -65,10 +65,20 @@ def cluster(y, X, n_clusters):
         model = SpectralCoclustering(n_clusters=n_clusters)
         model.fit(corr)
         clusters = [model.get_indices(i)[0] for i in range(n_clusters)]
-        fn_by_cluster = lambda x,fn,**kwargs: np.concatenate([fn(x[...,rng],axis=-1,**kwargs)[...,np.newaxis]
-                                                              for rng in clusters],axis=-1)
+        def fn_by_cluster(x,fn,weights=None):
+            if weights is not None:
+                return np.concatenate([fn(x[..., rng], axis=-1, weights=weights[i])[..., np.newaxis]
+                                       for i, rng in enumerate(clusters)], axis=-1)
+            else:
+                return np.concatenate([fn(x[..., rng], axis=-1)[..., np.newaxis]
+                                       for i, rng in enumerate(clusters)],axis=-1)
+
+        fn_market_share = lambda x: [np.sum(x[...,rng],axis=0)/np.sum(x[...,rng]) for rng in clusters]
+
         y_ = fn_by_cluster(y,np.sum)
-        X_ = fn_by_cluster(X,np.mean)
+        #Compute within-group market shares
+        y_weights = fn_market_share(y)
+        X_ = fn_by_cluster(X,np.average,y_weights)
         return y_, X_, clusters
     else:
         return np.sum(y,axis=-1)[...,np.newaxis],np.mean(X,axis=-1)[...,np.newaxis],1
