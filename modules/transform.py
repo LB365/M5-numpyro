@@ -25,11 +25,11 @@ def expectation_convolution(x, steps, two_sided):
 
 
 def log_normalise(x):
-    # tol = 0.001
-    # mask = (x.std(axis=0) < tol)
-    # random_price = onp.random.rand(x.shape[0])
-    # random_price_mask = onp.dot(random_price.reshape((-1, 1)), mask.reshape((-1, 1)).T)
-    X = onp.log(x)
+    tol = 0.001
+    mask = (x.std(axis=0) < tol)
+    random_price = onp.random.rand(x.shape[0])
+    random_price_mask = onp.dot(random_price.reshape((-1, 1)), mask.reshape((-1, 1)).T)
+    X = onp.log(x) + random_price_mask
     return (X - onp.mean(X, axis=0)) / onp.std(X, axis=0)
 
 
@@ -58,9 +58,9 @@ def transform(transformation_function, training_data, t_covariates, *args):
 def cluster(y, X, n_clusters):
     if n_clusters != 1 :
         y_ = onp.array(y,dtype='float64')
-        mask = (onp.diff(y, n=1, axis=0) == 0).argmin(axis=0)
-        for i in range(mask.size):
-            y_[range(mask[i]),i] = np.nan
+        # mask = onp.clip((onp.diff(y, n=1, axis=0) == 0).argmin(axis=0),a_max=2 * (y.shape[0] // 3),a_min=0)
+        # for i in range(mask.size):
+        #     y_[range(mask[i]),i] = np.nan
         corr = pd.DataFrame(y_).corr(method='kendall')
         model = SpectralCoclustering(n_clusters=n_clusters)
         model.fit(corr)

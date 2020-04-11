@@ -1,7 +1,7 @@
 import logging
 logging.basicConfig(level=logging.INFO)
 from modules.transform import log_normalise,cluster,expectation_convolution,transform,hump
-from modules.numpyro_models import normal_model_hierarchical,poisson_model_hierarchical
+from modules.numpyro_models import HierarchicalModel
 from modules.inference import run_inference,posterior_predictive
 from modules.metrics import Metrics
 from modules.plots import plot_fit,plot_inference,plot_parameter_by_inference,plot_sales_and_covariate
@@ -11,6 +11,7 @@ from jax import lax, random, vmap
 from jax.nn import softmax
 import numpy as onp
 import numpyro
+from numpyro.diagnostics import hpdi
 import pyro
 import torch
 from pyro.contrib.forecast import ForecastingModel, Forecaster, backtest, eval_crps, HMCForecaster
@@ -19,7 +20,7 @@ from pyro.infer.reparam import LocScaleReparam, StableReparam
 from pyro.ops.tensor_utils import periodic_cumsum, periodic_repeat, periodic_features
 from pyro.ops.stats import quantile
 import matplotlib.pyplot as plt
-numpyro.set_host_device_count(4)
+numpyro.set_host_device_count(8)
 logger = logging.getLogger()
 
 def jax_to_torch(x):
@@ -29,15 +30,16 @@ def jax_to_torch(x):
 def load_input():
     assert numpyro.__version__.startswith('0.2.4')
     logger.info('Main starting')
+    jitter = 10 * 10 ** -1
     steps = 2
     n_days = 15
-    items = range(0,50)
+    items = range(0,500)
     variable = ['sales']  # Target variables
-    covariates = ['month', 'snap', 'christmas', 'event', 'price']  # List of considered covariates
+    covariates = ['month', 'snap', 'christmas', 'event', 'price','trend']  # List of considered covariates
     ind_covariates = ['price', 'snap']  # Item-specific covariates
     common_covariates = set(covariates).difference(ind_covariates)  # List of non item-specific covariates
     t_covariates = ['event', 'christmas']  # List of transformed covariates
-    norm_covariates = ['price']  # List of normalised covariates
+    norm_covariates = ['price', 'trend']  # List of normalised covariates
     hump_covariates = ['month']  # List of convoluted covariates
     logger.info('Loading data')
     calendar, training_data = load_training_data(items=items, covariates=covariates)
@@ -53,26 +55,45 @@ def load_input():
     X_c_dim = dict(zip(common_covariates, [training_data[x].shape[-1] for x in common_covariates]))
     X = np.concatenate([X_c, X_i], axis=1)
     # Aggregation
-    y,X,clusters = cluster(y,X,2)
+    y,X,clusters = cluster(y,X,8)
     X_dim = {**X_c_dim, **X_i_dim}
     return {'X': X,
             'X_dim': X_dim,
-            'y': y},calendar
+            'y': y}, calendar
 
 def main(pyro_backend=None):
     inputs,calendar = load_input()
     logger.info('Inference')
     if pyro_backend is None:
-        samples_hmc = run_inference(model=normal_model_hierarchical,inputs=inputs)
-        trace = posterior_predictive(normal_model_hierarchical, samples_hmc, inputs)
-        metric_data = {'trace':trace,
-                       'actual':inputs['y'],
-                       'alpha':0.95}
+        T1 = 1500
+        T2 = inputs['X'].shape[0]
+        X_train, y_train, X_test, y_test = inputs['X'][:T1], inputs['y'][:T1], inputs['X'][T1:], inputs['y'][T1:]
+        inputs_train = {'X': X_train, 'y': y_train}
+        model = HierarchicalModel(rw=True,X_dim=inputs['X_dim'])
+        samples = run_inference(model=model.model, inputs=inputs_train,method='SVI')
+        trace = posterior_predictive(model.model, samples, inputs_train)
+        # In sample metrics
+        metric_data = {'trace':trace, 'actual':y_train, 'alpha':0.95}
         m = Metrics(**metric_data)
         forecasts = m.moments
         hit_rate = m.hit_rate
-        plot_fit(forecasts,hit_rate, inputs['y'], calendar)
+        plot_fit(forecasts,hit_rate, y_train, calendar[:T1])
         print(r'Hit rate={0:0.2f}'.format(hit_rate))
+        # Out of sample forecast
+        rng_keys = random.split(random.PRNGKey(3), samples["dof"].shape[0])
+        forecast_marginal = vmap(lambda rng_key, sample: model.forecast(
+            y_test.shape[0], rng_key, sample, X_test, y_train))(rng_keys, samples)
+        y_pred = np.mean(forecast_marginal, axis=0)
+        range_test = np.arange(T1,T2)
+        range_total = np.arange(T2)
+        hpd_low, hpd_high = hpdi(forecast_marginal)
+        fig, axes = plt.subplots(inputs['y'].shape[-1], 1, figsize=(9, 10), sharex=True)
+        plt.title("Forecasting sales (95% HPDI)")
+        for i, ax in enumerate(axes):
+            ax.plot(range_total, inputs['y'][:,i])
+            ax.plot(range_test, y_pred[:,i], lw=2)
+            ax.fill_between(range_test, hpd_low[:, i], hpd_high[:, i], color="red", alpha=0.3)
+        plt.show()
     else:
         covariates, covariate_dim, data = inputs.values()
         data, covariates = map(jax_to_torch,[data,covariates])

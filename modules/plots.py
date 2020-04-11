@@ -27,7 +27,7 @@ def plot_fit(forecasts, hit_rate, y, calendar):
     for i in range(y.shape[1]):
         if y.shape[1] == 1:
             ax.plot(calendar, y, label='sales')
-            ax.plot(calendar, forecasts['mean'], label='prediction')
+            ax.plot(calendar, forecasts['mean'][:,0], label='prediction')
             ax.fill_between(calendar, forecasts['lower'][:,0], forecasts['upper'][:,0], alpha=0.2, color='red')
         else:
             ax[i // n_cols, i % n_cols].plot(calendar, y[:, i], label='sales')

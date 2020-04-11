@@ -11,7 +11,7 @@ from datetime import datetime
 import pickle
 
 def trend(s_datetime):
-    return  1 + (((s_datetime.values.astype(np.int64)) // 10**9 - 1296259200) // 86400)
+    return  2 + (((s_datetime.values.astype(np.int64)) // 10**9 - 1296259200) // 86400)
 
 def pickle_path(name):
     return r'data/{}.pkl'.format(name)

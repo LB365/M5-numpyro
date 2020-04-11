@@ -17,7 +17,7 @@ class Metrics():
     @property
     def moments(self):
         if self._moments is None:
-            mean = onp.mean(self.trace, axis=0)
+            mean = onp.mean(self.trace, axis=0)[...,None]
             hpdi_0, hpdi_1 = hpdi(self.trace, prob=self.alpha)
             names, values = ['lower', 'mean', 'upper'], [hpdi_0, mean, hpdi_1]
             self._moments = dict(zip(names, values))
