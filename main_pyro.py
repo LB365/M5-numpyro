@@ -34,7 +34,7 @@ def load_input():
     n_days = 15
     items = range(200)
     variable = ['sales']  # Target variables
-    covariates = ['month', 'snap', 'christmas', 'event', 'dayofweek', 'thanksgiving']  # List of considered covariates
+    covariates = ['month', 'snap', 'christmas', 'event', 'trend', 'dayofweek', 'thanksgiving']  # List of considered covariates
     ind_covariates = ['snap']  # Item-specific covariates
     common_covariates = set(covariates).difference(ind_covariates)  # List of non item-specific covariates
     t_covariates = ['event', 'christmas']  # List of transformed covariates
@@ -54,13 +54,13 @@ def load_input():
     X_c_dim = dict(zip(common_covariates, [training_data[x].shape[-1] for x in common_covariates]))
     X = np.concatenate([X_i,X_c], axis=1)
     # Aggregation
-    y,X,clusters = cluster(y,X,1)
+    y,X,clusters = cluster(y,X,2)
     X_dim = {**X_i_dim, **X_c_dim}
     return {'X': X,
             'X_dim': X_dim,
             'y': np.log(1+y)}, calendar
 
-def main(pyro_backend=None):
+def main():
     inputs,calendar = load_input()
     logger.info('Inference')
     covariates, covariate_dim, data = inputs.values()
@@ -70,13 +70,13 @@ def main(pyro_backend=None):
     pyro.enable_validation(True)
     T0 = 0  # begining
     T2 = data.size(-2)  # end
-    T1 = T2 - 1000  # train/test split
+    T1 = T2 - 500  # train/test split
     pyro.set_rng_seed(1)
     pyro.clear_param_store()
     data = data.permute(-2,-1)
     covariates = covariates.reshape(data.size(-1),T2,-1)
     # covariates = torch.zeros(len(data), 0)  # empty
-    forecaster = Forecaster(Model4(), data[:T1], covariates[:,:T1], learning_rate=0.05,num_steps=2000)
+    forecaster = Forecaster(Model4(), data[:T1], covariates[:,:T1], learning_rate=0.09,num_steps=2000)
     samples = forecaster(data[:T1], covariates[:,:T2], num_samples=336)
     samples.clamp_(min=0)  # apply domain knowledge: the samples must be positive
     p10, p50, p90 = quantile(samples[:, 0], [0.1, 0.5, 0.9]).squeeze(-1)

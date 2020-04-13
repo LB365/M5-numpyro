@@ -248,7 +248,7 @@ class M5Data:
         Chrismas.
         """
         cal = self.calendar_df.index.to_frame()
-        condition = (cal['date'].dt.dayofweek == 3) & (cal['date'].dt.month == 11) & (cal['date'].dt.day > 22)
+        condition = (cal['date'].dt.dayofweek == 3) & (cal['date'].dt.month == 11) & (cal['date'].dt.day >= 22)
         thanksgiving = condition.values[..., None]
         x = thanksgiving.astype(int)
         assert x.shape == (self.num_days, 1)
