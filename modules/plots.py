@@ -76,3 +76,31 @@ def plot_parameter_by_inference(sample_svi,sample_hmc,parameter):
         ax.set_title(r'Parameter: {}'.format(parameter))
         ax.legend()
     plt.show()
+
+def plot_predict(moments,in_sample_forecasts,y_test,y_train,calendar):
+    exp_1 = lambda x: np.exp(x) - 1
+    y = exp_1(np.concatenate([y_train,y_test],axis=0))
+    m_ = exp_1(in_sample_forecasts['mean'])
+    hpd_low, y_pred, hpd_high = [exp_1(x) for x in moments.values()]
+    range_test = np.arange(calendar.shape[0]) >= y_train.shape[0]
+    range_train = np.arange(calendar.shape[0]) < y_train.shape[0]
+    n_plots = y_test.shape[-1]
+    if n_plots > 3:
+        n_cols = int(np.sqrt(n_plots))
+        n_rows = n_cols + 1 * ((n_plots % n_cols)>0)
+    else:
+        n_cols, n_rows = n_plots, 1
+    fig, axes = plt.subplots(nrows=n_rows,ncols=n_cols, figsize=(9, 10), sharex=True)
+    if n_plots == 1:
+        axes.plot(calendar, y[:, 0], color='black')
+        axes.plot(calendar[range_train], m_[:, 0])
+        axes.plot(calendar[range_test], y_pred[:, 0], lw=2, color="red")
+        axes.fill_between(calendar[range_test], hpd_low[:, 0], hpd_high[:, 0], color="red", alpha=0.3)
+    else:
+        for i, ax in enumerate(axes.flatten()[:n_plots]):
+            ax.plot(calendar, y[:, i],color='black')
+            ax.plot(calendar[range_train], m_[:, i])
+            ax.plot(calendar[range_test], y_pred[:, i], lw=2, color="red")
+            ax.fill_between(calendar[range_test], hpd_low[:, i], hpd_high[:, i], color="red", alpha=0.3)
+    fig.legend(labels=('ground truth','in-sample prediction','out-of-sample prediction'))
+    plt.show()

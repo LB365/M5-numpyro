@@ -11,7 +11,7 @@ from datetime import datetime
 import pickle
 
 def trend(s_datetime):
-    return  2 + (((s_datetime.values.astype(np.int64)) // 10**9 - 1296259200) // 86400)
+    return  np.linspace(start=-1, stop=1, num=s_datetime.shape[0])
 
 def pickle_path(name):
     return r'data/{}.pkl'.format(name)
@@ -242,12 +242,24 @@ class M5Data:
         assert x.shape == (self.num_days, 1)
         return x
 
+    def get_thanksgiving(self):
+        """
+        Returns a boolean 1D tensor with length `num_days` indicating if that day is
+        Chrismas.
+        """
+        cal = self.calendar_df.index.to_frame()
+        condition = (cal['date'].dt.dayofweek == 3) & (cal['date'].dt.month == 11) & (cal['date'].dt.day > 22)
+        thanksgiving = condition.values[..., None]
+        x = thanksgiving.astype(int)
+        assert x.shape == (self.num_days, 1)
+        return x
+
     def get_trend(self):
         """
         Returns a boolean 1D tensor with length `num_days` indicating if that day is
         Chrismas.
         """
-        x = trend(self.calendar_df.index)[...,None]
+        x = trend(self.calendar_df)[...,None]
         assert x.shape == (self.num_days, 1)
         return x
 
@@ -399,7 +411,8 @@ def load_training_data(items, covariates=None):
                      'month',
                      'snap',
                      'event',
-                     'trend']
+                     'trend',
+                     'thanksgiving']
     functions = [m5.get_prices,
                  m5.get_christmas,
                  m5.get_dummy_day_of_week,
@@ -407,7 +420,8 @@ def load_training_data(items, covariates=None):
                  m5.get_dummy_month_of_year,
                  m5.get_snap,
                  m5.get_event,
-                 m5.get_trend]
+                 m5.get_trend,
+                 m5.get_thanksgiving]
     _ = dict(zip(variables_set, functions))
     selected_variables = {k: _[k] for k in covariates}
     data = [f() for f in list(selected_variables.values())]

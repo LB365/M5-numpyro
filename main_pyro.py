@@ -54,40 +54,45 @@ def load_input():
     X_c_dim = dict(zip(common_covariates, [training_data[x].shape[-1] for x in common_covariates]))
     X = np.concatenate([X_i,X_c], axis=1)
     # Aggregation
-    y,X,clusters = cluster(y,X,2)
+    y,X,clusters = cluster(y,X,1)
     X_dim = {**X_i_dim, **X_c_dim}
     return {'X': X,
             'X_dim': X_dim,
             'y': np.log(1+y)}, calendar
 
-def main():
+def main(pyro_backend=None):
     inputs,calendar = load_input()
     logger.info('Inference')
-    T1 = 1500
-    T2 = inputs['X'].shape[0]
-    X_train, y_train, X_test, y_test = inputs['X'][:T1], inputs['y'][:T1], inputs['X'][T1:], inputs['y'][T1:]
-    inputs_train = {'X': X_train, 'y': y_train}
-    Model = HierarchicalLLM(X_dim=inputs['X_dim'])
-    samples = run_inference(model=Model.model, inputs=inputs_train)
-    trace = posterior_predictive(Model.model, samples, inputs_train)
-    # In sample forecast
-    metric_data = {'trace':trace, 'actual':y_train, 'alpha':0.95}
-    in_sample = Metrics(**metric_data)
-    in_sample_forecasts = in_sample.moments
-    print(r'In sample hit rate={0:0.2f}'.format(in_sample.hit_rate))
-    plot_fit(in_sample_forecasts,in_sample.hit_rate,y_train,calendar[:T1])
-    # Out of sample forecast
-    forecasts = predict(model=Model,
-                        samples=samples,
-                        y_test=y_test,
-                        X_test=X_test,
-                        y_train=y_train,
-                        X_train=X_train)
-    metric_data = {'trace':forecasts, 'actual': y_test, 'alpha': 0.95}
-    out_of_sample = Metrics(**metric_data)
-    out_of_sample_forecasts = out_of_sample.moments
-    plot_predict(out_of_sample_forecasts,in_sample_forecasts,y_test,y_train,calendar)
-    print(r'Out of sample hit rate={0:0.2f}'.format(out_of_sample.hit_rate))
+    covariates, covariate_dim, data = inputs.values()
+    data, covariates = map(jax_to_torch,[data,covariates])
+    data = torch.log(1+data.double())
+    assert pyro.__version__.startswith('1.3.1')
+    pyro.enable_validation(True)
+    T0 = 0  # begining
+    T2 = data.size(-2)  # end
+    T1 = T2 - 1000  # train/test split
+    pyro.set_rng_seed(1)
+    pyro.clear_param_store()
+    data = data.permute(-2,-1)
+    covariates = covariates.reshape(data.size(-1),T2,-1)
+    # covariates = torch.zeros(len(data), 0)  # empty
+    forecaster = Forecaster(Model4(), data[:T1], covariates[:,:T1], learning_rate=0.05,num_steps=2000)
+    samples = forecaster(data[:T1], covariates[:,:T2], num_samples=336)
+    samples.clamp_(min=0)  # apply domain knowledge: the samples must be positive
+    p10, p50, p90 = quantile(samples[:, 0], [0.1, 0.5, 0.9]).squeeze(-1)
+    crps = eval_crps(samples, data[T1:T2])
+    print(samples.shape, p10.shape)
+    fig, axes = plt.subplots(data.size(-1), 1, figsize=(9, 10), sharex=True)
+    plt.subplots_adjust(hspace=0)
+    axes[0].set_title("Sales (CRPS = {:0.3g})".format(crps))
+    for i, ax in enumerate(axes):
+        ax.fill_between(torch.arange(T1, T2), p10[:, i], p90[:, i], color="red", alpha=0.3)
+        ax.plot(torch.arange(T1, T2), p50[:, i], 'r-', lw=1, label='forecast')
+        ax.plot(torch.arange(T0, T2),data[: T2, i], 'k-', lw=1, label='truth')
+        ax.set_ylabel(f"item: {i}")
+    axes[0].legend(loc="best")
+    plt.show()
+    plt.savefig('figures/pyro_forecast.png')
 
 
 
