@@ -16,8 +16,9 @@ from numpyro.contrib.autoguide import (AutoContinuousELBO,
                                        AutoDiagonalNormal,
                                        AutoBNAFNormal,
                                        AutoMultivariateNormal,
-                                       AutoLowRankMultivariateNormal)
-from numpyro.optim import Adam
+                                       AutoLowRankMultivariateNormal,
+                                       AutoIAFNormal)
+from numpyro.optim import Adam,Adagrad
 from numpyro.infer import Predictive
 
 logger = logging.getLogger()
@@ -26,7 +27,7 @@ logger = logging.getLogger()
 def run_inference(model, inputs, method=None):
     if method is None:
         # NUTS
-        num_samples = 5000
+        num_samples = 1000
         logger.info('NUTS sampling')
         kernel = NUTS(model)
         mcmc = MCMC(kernel, num_warmup=300, num_samples=num_samples)
@@ -39,11 +40,11 @@ def run_inference(model, inputs, method=None):
         #SVI
         logger.info('Guide generation...')
         rng_key = random.PRNGKey(0)
-        guide = AutoDiagonalNormal(model=model)
+        guide = AutoIAFNormal(model=model)
         logger.info('Optimizer generation...')
-        optim = Adam(0.05)
+        optimizer = Adam(0.1)
         logger.info('SVI generation...')
-        svi = SVI(model, guide, optim, AutoContinuousELBO(), **inputs)
+        svi = SVI(model, guide, optimizer, AutoContinuousELBO(), **inputs)
         init_state = svi.init(rng_key)
         logger.info('Scan...')
         state, loss = lax.scan(lambda x,i: svi.update(x), init_state, np.zeros(2000))

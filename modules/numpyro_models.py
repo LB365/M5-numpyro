@@ -10,6 +10,7 @@ assert numpyro.__version__.startswith('0.2.4')
 numpyro.set_host_device_count(4)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
+from progress.bar import Bar
 
 
 class Model(object):
@@ -69,12 +70,12 @@ class HierarchicalDrift(Model):
             C = np.repeat(const[None, ...], repeats=l, axis=0)
             mu += C
             # Stochastic Trend
-            sigma_rw = numpyro.sample('sigma_rw', fn=dist.HalfNormal(0.0002))
-            rw = numpyro.sample('rw', fn=dist.GaussianRandomWalk(scale=sigma_rw))
+            sigma_rw = numpyro.sample('sigma_rw', fn=dist.HalfNormal(0.0005))
+            rw = numpyro.sample('rw', fn=dist.GaussianRandomWalk(scale=sigma_rw,num_steps=l))
             # Autoregressive component
             alpha = numpyro.sample(name="alpha", fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1.),
                                                                                  transforms=dist.transforms.AffineTransform(
-                                                                                     loc=-0.8, scale=0.1,
+                                                                                     loc=-0.5, scale=0.5,
                                                                                      domain=dist.constraints.interval(
                                                                                          -1, 0))))
             (z_last, mu_last, rw_last), Z = self.scan_fn(alpha=alpha,
@@ -93,7 +94,7 @@ class HierarchicalDrift(Model):
             # Inference
             with numpyro.plate('y', l):
                 with handlers.mask(np.arange(l)[..., None] < brk):
-                    obs = numpyro.sample('obs', fn=dist.Normal(loc=Z, scale=sigma_sto), obs=y)
+                    numpyro.sample('obs', fn=dist.Normal(loc=Z, scale=sigma_sto), obs=y)
                     return z_last, mu_last, rw_last
 
     def scan_fn(self, alpha, z_init, mu_0, rw_0, y, rw, mu, dz):
@@ -106,7 +107,7 @@ class HierarchicalDrift(Model):
             def _body_fn(carry, x):
                 z_prev, x_, rw_ = carry
                 z_t = np.multiply(alpha, (z_prev - x_)) + mu[x] + rw[x]
-                return (mu[x], mu[x], rw[x]), z_t
+                return (z_t, mu[x], rw[x]), z_t
         return lax.scan(_body_fn, (z_init, mu_0, rw_0), dz)
 
     def _forecast(self, future, sample, X, z_last, mu_last, rw_last):
@@ -114,7 +115,6 @@ class HierarchicalDrift(Model):
                         sample['beta_covariates'].T[..., None])
               .sum(-1).T + sample['const'])
         for t in range(future):
-            # logger.info(f'forecasting iteration: {t}')
             rw_ = numpyro.sample(f"rw[{t}]", dist.Normal(rw_last, sample['sigma_rw']))
             mu_ = np.multiply(sample['alpha'], z_last - mu_last) + mu[t]
             mean_ = mu_ + rw_
@@ -135,7 +135,6 @@ class HierarchicalLLM(Model):
     def __init__(self, X_dim):
         """
         HierarchicalModel parameters initialisation
-        :param rw: Include random walk term ?
         :param X_dim: dict with variable dimensions
         """
         self.X_dim = X_dim
@@ -177,24 +176,21 @@ class HierarchicalLLM(Model):
             mu += C
             # Stochastic Trend
             sigma_trend = numpyro.sample('sigma_trend', fn=dist.HalfNormal(0.002))
-            with numpyro.plate('rw_plate', l):
-                rw = numpyro.sample('rw', fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1),
-                                                                          transforms=dist.transforms.AffineTransform(
-                                                                              loc=0, scale=sigma_trend)))
+            rw = numpyro.sample('rw', fn=dist.GaussianRandomWalk(scale=sigma_trend,num_steps=l))
             # Autoregressive component
             alpha = numpyro.sample(name="alpha", fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1.),
                                                                                  transforms=dist.transforms.AffineTransform(
                                                                                      loc=0.0, scale=0.5,
                                                                                      domain=dist.constraints.interval(
                                                                                          -1, 1))))
-            (z_prev, mu_prev, llw_prev, rw_prev), Z = self.scan_fn(alpha=alpha,
-                                                                   mu_0=mu[0],
-                                                                   llm_0=rw[0],
-                                                                   rw_0=np.zeros((n_items,)),
-                                                                   llm=rw[1:],
-                                                                   mu=mu[1:],
-                                                                   dz=np.arange(1, l))
-            Z = np.concatenate([mu[0].reshape(-1, n_items), Z], axis=0)
+            (z_prev, mu_prev, rw_prev), Z = self.scan_fn(alpha=alpha,
+                                                         z_0=np.zeros((n_items,)),
+                                                         mu_0=np.zeros((n_items,)),
+                                                         rw_0=np.zeros((n_items,)),
+                                                         y=y,
+                                                         rw=rw.T,
+                                                         mu=mu,
+                                                         dz=np.arange(l))
             # Break detection
             if y is not None:
                 brk = numpyro.deterministic('brk', (np.diff(y, n=1, axis=0) == 0).argmin(axis=0))
@@ -206,16 +202,20 @@ class HierarchicalLLM(Model):
                     obs = numpyro.sample('obs', fn=dist.Normal(loc=Z, scale=sigma_sto), obs=y)
                     return z_prev, mu_prev, rw_prev
 
-    def scan_fn(self, alpha, mu_0, llm_0, rw_0, llm, mu, dz):
-        def _body_fn(carry, x):
-            z_prev, x_, llm_, rw_ = carry
-            llm_ += llm[x]
-            rw_ += llm_
-            z_t = np.multiply(alpha, (z_prev - x_)) + mu[x] + rw_
-            z_prev = z_t.reshape(-1, 1)[:, -1]
-            return (z_prev, mu[x], llm_, rw_), z_t
-
-        return lax.scan(_body_fn, (mu_0, mu_0, llm_0, rw_0), dz)
+    def scan_fn(self, alpha, z_0, mu_0, rw_0, y, rw, mu, dz):
+        if y is not None:
+            def _body_fn(carry, x):
+                z_prev, x_, rw_ = carry
+                rw_ += rw[x]
+                z_t = np.multiply(alpha, (z_prev - x_)) + mu[x] + rw_
+                return (y[x], mu[x], rw_), z_t
+        else:
+            def _body_fn(carry, x):
+                z_prev, x_, rw_ = carry
+                rw_ += rw[x]
+                z_t = np.multiply(alpha, (z_prev - x_)) + mu[x] + rw_
+                return (z_t, mu[x], rw_), z_t
+        return lax.scan(_body_fn, (z_0, mu_0, rw_0), dz)
 
     def _forecast(self, future, sample, X, z_prev, mu_prev, rw_prev):
         beta = sample['beta_covariates']

@@ -80,7 +80,7 @@ def plot_parameter_by_inference(sample_svi,sample_hmc,parameter):
 def plot_predict(moments,in_sample_forecasts,y_test,y_train,calendar):
     exp_1 = lambda x: np.exp(x) - 1
     y = exp_1(np.concatenate([y_train,y_test],axis=0))
-    m_ = exp_1(in_sample_forecasts['mean'])
+    l_, m_, h_ = [exp_1(x) for x in in_sample_forecasts.values()]
     hpd_low, y_pred, hpd_high = [exp_1(x) for x in moments.values()]
     range_test = np.arange(calendar.shape[0]) >= y_train.shape[0]
     range_train = np.arange(calendar.shape[0]) < y_train.shape[0]
@@ -94,13 +94,16 @@ def plot_predict(moments,in_sample_forecasts,y_test,y_train,calendar):
     if n_plots == 1:
         axes.plot(calendar, y[:, 0], color='black')
         axes.plot(calendar[range_train], m_[:, 0])
+        axes.fill_between(calendar[range_train], l_[:, 0], h_[:, 0], color="green", alpha=0.2)
         axes.plot(calendar[range_test], y_pred[:, 0], lw=2, color="red")
         axes.fill_between(calendar[range_test], hpd_low[:, 0], hpd_high[:, 0], color="red", alpha=0.3)
     else:
         for i, ax in enumerate(axes.flatten()[:n_plots]):
             ax.plot(calendar, y[:, i],color='black')
             ax.plot(calendar[range_train], m_[:, i])
+            ax.fill_between(calendar[range_train], l_[:, i], h_[:, i], color="green", alpha=0.2)
             ax.plot(calendar[range_test], y_pred[:, i], lw=2, color="red")
             ax.fill_between(calendar[range_test], hpd_low[:, i], hpd_high[:, i], color="red", alpha=0.3)
-    fig.legend(labels=('ground truth','in-sample prediction','out-of-sample prediction'))
+    fig.legend(labels=('ground truth','in-sample prediction','out-of-sample prediction',
+                       f'in-sample {0.95} % interval', f'out-of-sample {0.95} % interval'))
     plt.show()

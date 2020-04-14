@@ -37,7 +37,7 @@ def load_input():
     n_days = 15
     items = range(200)
     variable = ['sales']  # Target variables
-    covariates = ['month', 'snap', 'christmas', 'event', 'trend', 'dayofweek',
+    covariates = ['month', 'snap', 'christmas', 'event', 'dayofweek',
                   'thanksgiving']  # List of considered covariates
     ind_covariates = ['snap']  # Item-specific covariates
     common_covariates = set(covariates).difference(ind_covariates)  # List of non item-specific covariates
@@ -58,7 +58,7 @@ def load_input():
     X_c_dim = dict(zip(common_covariates, [training_data[x].shape[-1] for x in common_covariates]))
     X = np.concatenate([X_i, X_c], axis=1)
     # Aggregation
-    y, X, clusters = cluster(y, X, 2)
+    y, X, clusters = cluster(y, X, 10)
     X_dim = {**X_i_dim, **X_c_dim}
     return {'X': X,
             'X_dim': X_dim,
@@ -68,12 +68,11 @@ def load_input():
 def main():
     inputs, calendar = load_input()
     logger.info('Inference')
-    T1 = 1000
-    T2 = inputs['X'].shape[0]
+    T1 = 1500 # Training set
     X_train, y_train, X_test, y_test = inputs['X'][:T1], inputs['y'][:T1], inputs['X'][T1:], inputs['y'][T1:]
     inputs_train = {'X': X_train, 'y': y_train}
     Model = HierarchicalDrift(X_dim=inputs['X_dim'])
-    samples = run_inference(model=Model.model, inputs=inputs_train)
+    samples = run_inference(model=Model.model, inputs=inputs_train, method='SVI')
     trace = posterior_predictive(Model.model, samples, inputs_train)
     # In sample forecast
     metric_data = {'trace': trace, 'actual': y_train, 'alpha': 0.95}
