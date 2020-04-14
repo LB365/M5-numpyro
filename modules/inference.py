@@ -40,7 +40,7 @@ def run_inference(model, inputs, method=None):
         #SVI
         logger.info('Guide generation...')
         rng_key = random.PRNGKey(0)
-        guide = AutoIAFNormal(model=model)
+        guide = AutoDiagonalNormal(model=model)
         logger.info('Optimizer generation...')
         optimizer = Adam(0.1)
         logger.info('SVI generation...')

@@ -7,7 +7,7 @@ from numpyro.diagnostics import hpdi
 import pyro
 import torch
 from modules.transform import log_normalise, cluster, expectation_convolution, transform, hump
-from modules.numpyro_models import HierarchicalDrift, HierarchicalMeanReverting, HierarchicalLLM
+from modules.numpyro_models import HierarchicalDrift, HierarchicalMeanReverting, HierarchicalLLM, HierarchicalDriftVolSto
 from modules.inference import run_inference, posterior_predictive, predict
 from modules.metrics import Metrics
 from modules.plots import plot_fit, plot_inference, plot_parameter_by_inference, plot_sales_and_covariate, plot_predict
@@ -58,7 +58,7 @@ def load_input():
     X_c_dim = dict(zip(common_covariates, [training_data[x].shape[-1] for x in common_covariates]))
     X = np.concatenate([X_i, X_c], axis=1)
     # Aggregation
-    y, X, clusters = cluster(y, X, 10)
+    y, X, clusters = cluster(y, X, 3)
     X_dim = {**X_i_dim, **X_c_dim}
     return {'X': X,
             'X_dim': X_dim,
@@ -71,7 +71,7 @@ def main():
     T1 = 1500 # Training set
     X_train, y_train, X_test, y_test = inputs['X'][:T1], inputs['y'][:T1], inputs['X'][T1:], inputs['y'][T1:]
     inputs_train = {'X': X_train, 'y': y_train}
-    Model = HierarchicalDrift(X_dim=inputs['X_dim'])
+    Model = HierarchicalDriftVolSto(X_dim=inputs['X_dim'])
     samples = run_inference(model=Model.model, inputs=inputs_train, method='SVI')
     trace = posterior_predictive(Model.model, samples, inputs_train)
     # In sample forecast

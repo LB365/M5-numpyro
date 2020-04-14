@@ -130,6 +130,114 @@ class HierarchicalDrift(Model):
         return np.stack(results, axis=0)
 
 
+class HierarchicalDriftVolSto(Model):
+
+    def __init__(self, X_dim):
+        """
+        HierarchicalModel parameters initialisation
+        :param X_dim: dict with variable dimensions
+        """
+        self.X_dim = X_dim
+        self.values = list(self.X_dim.values())
+        self.n_cov = len(self.values)
+        # Seasonality and regression effects
+        self.l, self.n_, self.n_items = None, None, None
+
+    def model(self, X, y=None):
+        l, n_, n_items = X.shape
+        jitter = 10 ** -25
+        if n_items > 1:
+            beta_meta = numpyro.sample('beta_meta', fn=dist.Normal(0, 1))
+            sigma_meta = numpyro.sample('sigma_meta', fn=dist.HalfNormal(3))
+        else:
+            beta_meta = numpyro.deterministic('beta_meta', value=np.array(0.))
+            sigma_meta = numpyro.deterministic('sigma_meta', value=np.array(1))
+        # Plate over items
+        with numpyro.plate('items', n_items):
+            sigma_sto_sigma = numpyro.sample('sigma_sto_sigma', fn=dist.HalfNormal(0.00005))
+            sigma_sto = numpyro.sample('sigma_sto', fn=dist.GaussianRandomWalk(scale=sigma_sto_sigma,num_steps=l))
+            # Plate over variables
+            with numpyro.plate('n_cov', self.n_cov):
+                beta = numpyro.sample('beta', fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1.),
+                                                                              transforms=dist.transforms.AffineTransform(
+                                                                                  loc=beta_meta, scale=sigma_meta)))
+                sigma = numpyro.sample('sigma', fn=dist.HalfNormal(1))
+            # Plate over variable dimension
+            beta_long = np.repeat(beta, self.values, axis=0)
+            sigma_long = np.repeat(sigma, self.values, axis=0)
+            with numpyro.plate('covariates', n_):
+                beta_covariates = numpyro.sample(name='beta_covariates',
+                                                 fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1),
+                                                                                 transforms=dist.transforms.AffineTransform(
+                                                                                     loc=beta_long, scale=sigma_long)))
+            mu = np.matmul(X.transpose((-1, -3, -2)), beta_covariates.T[..., None]).sum(-1).T
+            # Constant
+            const = numpyro.sample('const', fn=dist.Normal(0, 15))
+            C = np.repeat(const[None, ...], repeats=l, axis=0)
+            mu += C
+            # Stochastic Trend
+            sigma_rw = numpyro.sample('sigma_rw', fn=dist.HalfNormal(0.0005))
+            rw = numpyro.sample('rw', fn=dist.GaussianRandomWalk(scale=sigma_rw,num_steps=l))
+            # Autoregressive component
+            alpha = numpyro.sample(name="alpha", fn=dist.TransformedDistribution(dist.Normal(loc=0., scale=1.),
+                                                                                 transforms=dist.transforms.AffineTransform(
+                                                                                     loc=-0.5, scale=0.5,
+                                                                                     domain=dist.constraints.interval(
+                                                                                         -1, 0))))
+            (z_last, mu_last, rw_last), Z = self.scan_fn(alpha=alpha,
+                                                         z_init=np.zeros(shape=(n_items,)),
+                                                         mu_0=np.zeros(shape=(n_items,)),
+                                                         rw_0=np.zeros(shape=(n_items,)),
+                                                         y=y,
+                                                         rw=rw.T,
+                                                         mu=mu,
+                                                         dz=np.arange(l))
+            # Break detection
+            if y is not None:
+                brk = numpyro.deterministic('brk', (np.diff(y, n=1, axis=0) == 0).argmin(axis=0))
+            else:
+                brk = X.shape[0]
+            # Inference
+            with numpyro.plate('y', l):
+                with handlers.mask(np.arange(l)[..., None] < brk):
+                    numpyro.sample('obs', fn=dist.Normal(loc=Z, scale= np.exp(sigma_sto.T)), obs=y)
+                    return z_last, mu_last, rw_last
+
+    def scan_fn(self, alpha, z_init, mu_0, rw_0, y, rw, mu, dz):
+        if y is not None:
+            def _body_fn(carry, x):
+                z_prev, x_, rw_ = carry
+                z_t = np.multiply(alpha, (z_prev - x_)) + mu[x] + rw[x]
+                return (y[x], mu[x], rw[x]), z_t
+        else:
+            def _body_fn(carry, x):
+                z_prev, x_, rw_ = carry
+                z_t = np.multiply(alpha, (z_prev - x_)) + mu[x] + rw[x]
+                return (z_t, mu[x], rw[x]), z_t
+        return lax.scan(_body_fn, (z_init, mu_0, rw_0), dz)
+
+    def _forecast(self, future, sample, X, z_last, mu_last, rw_last):
+        mu = (np.matmul(X.transpose((-1, -3, -2)),
+                        sample['beta_covariates'].T[..., None])
+              .sum(-1).T + sample['const'])
+        sigma_last = sample['sigma_sto'][:, -1]
+        for t in range(future):
+            rw_ = numpyro.sample(f"rw[{t}]", dist.Normal(rw_last, sample['sigma_rw']))
+            mu_ = np.multiply(sample['alpha'], z_last - mu_last) + mu[t]
+            mean_ = mu_ + rw_
+            sigma_ = numpyro.sample(f"sigma[{t}]", dist.Normal(sigma_last, sample['sigma_sto_sigma']))
+            y_ = numpyro.sample(f"yf[{t}]", dist.Normal(mean_, np.exp(sigma_)))
+            z_last, mu_last, rw_last, sigma_last = y_, mu_, rw_, sigma_
+
+    def forecast(self, future, rng_key, sample, X_test, X_train, y):
+        z_last, mu_last, rw_last = handlers.substitute(self.model, sample)(X_train, y)
+        forecast_model = handlers.seed(self._forecast, rng_key)
+        forecast_trace = handlers.trace(forecast_model).get_trace(future, sample, X_test, z_last, mu_last, rw_last)
+        results = [np.clip(forecast_trace[f"yf[{t}]"]["value"], a_min=1e-30)
+                   for t in range(future)]
+        return np.stack(results, axis=0)
+
+
 class HierarchicalLLM(Model):
 
     def __init__(self, X_dim):
