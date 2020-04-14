@@ -4,10 +4,24 @@
 import math
 import os
 import zipfile
-
+import dask.dataframe as dd
 import numpy as np
 import pandas as pd
 from datetime import datetime
+import pickle
+
+def trend(s_datetime):
+    return  np.linspace(start=-1, stop=1, num=s_datetime.shape[0])
+
+def pickle_path(name):
+    return r'data/{}.pkl'.format(name)
+
+def load_pickle(name):
+    return pickle.load(open(pickle_path(name), "rb"))
+
+def dump_pickle(data,name):
+    pickle.dump(data[name], open(pickle_path(name), "wb"))
+
 
 class M5Data:
     """
@@ -21,7 +35,7 @@ class M5Data:
     states = {"CA":0, "TX":1, "WI":2}
 
     def __init__(self, data_path=None):
-        self.data_path = os.path.abspath("data") if data_path is None else data_path
+        self.data_path = os.path.abspath("../data") if data_path is None else data_path
         if not os.path.exists(self.data_path):
             raise FileNotFoundError(f"There is no folder '{self.data_path}'.")
 
@@ -29,10 +43,10 @@ class M5Data:
         unc_path = os.path.join(self.data_path, "m5-forecasting-uncertainty.zip")
         self.acc_zipfile = zipfile.ZipFile(acc_path) if os.path.exists(acc_path) else None
         self.unc_zipfile = zipfile.ZipFile(unc_path) if os.path.exists(unc_path) else None
-
-        self._sales_df = None
-        self._calendar_df = None
-        self._prices_df = None
+        self.data_dict = {}
+        self.data_dict['_sales_df'] = None
+        self.data_dict['_calendar_df'] = None
+        self.data_dict['_prices_df'] = None
 
     @property
     def num_items(self):
@@ -60,25 +74,48 @@ class M5Data:
 
     @property
     def sales_df(self):
-        if self._sales_df is None:
-            self._sales_df = self._read_csv("sales_train_validation.csv", index_col=0)
-        return self._sales_df
+        name_df = '_sales_df'
+        if self.data_dict[name_df] is None:
+            if os.path.exists(pickle_path(name_df)):
+                return load_pickle(name_df)
+            else:
+                self.data_dict[name_df] = self._read_csv("sales_train_validation.csv", index_col=0)
+                dump_pickle(self.data_dict,name_df)
+            return self.data_dict[name_df]
+        else:
+            return self.data_dict[name_df]
 
     @property
     def calendar_df(self):
-        if self._calendar_df is None:
-            self._calendar_df = self._read_csv("calendar.csv", index_col=0)
-            self._calendar_df.index = pd.to_datetime(self._calendar_df.index)
-        return self._calendar_df
+        name_df = '_calendar_df'
+        if self.data_dict[name_df] is None:
+            if os.path.exists(pickle_path(name_df)):
+                return load_pickle(name_df)
+            else:
+                self.data_dict[name_df] = self._read_csv("calendar.csv", index_col=0)
+                self.data_dict[name_df].index = pd.to_datetime(self.data_dict[name_df].index)
+                dump_pickle(self.data_dict,name_df)
+                return self.data_dict[name_df]
+        else:
+            return self.data_dict[name_df]
+
 
     @property
     def prices_df(self):
-        if self._prices_df is None:
-            df = self._read_csv("sell_prices.csv")
-            df["id"] = df.item_id + "_" + df.store_id + "_validation"
-            df = pd.pivot_table(df, values="sell_price", index="id", columns="wm_yr_wk")
-            self._prices_df = df.fillna(method='bfill',axis=1).loc[self.sales_df.index]
-        return self._prices_df
+        name_df = '_prices_df'
+        if self.data_dict[name_df] is None:
+            if os.path.exists(pickle_path(name_df)):
+                return load_pickle(name_df)
+            else:
+                df = self._read_csv("sell_prices.csv")
+                df = df.assign(id = lambda x: x.item_id + "_" + x.store_id + "_validation")
+                df = pd.pivot_table(df, values="sell_price", index="id", columns="wm_yr_wk")
+                df = df.fillna(axis=1, method='backfill')
+                self.data_dict[name_df] = df.loc[self.sales_df.index]
+                dump_pickle(self.data_dict,name_df)
+                return self.data_dict[name_df]
+        else:
+            return self.data_dict[name_df]
 
     def listdir(self):
         """
@@ -94,7 +131,6 @@ class M5Data:
     def _read_csv(self, filename, index_col=None, use_acc_file=True):
         """
         Returns the dataframe from csv file ``filename``.
-
         :param str filename: name of the file with trailing `.csv`.
         :param int index_col: indicates which column from csv file is considered as index.
         :param bool acc_file: whether to load data from accuracy.zip file or uncertainty.zip file.
@@ -122,15 +158,13 @@ class M5Data:
     def get_prices(self):
         """
         Returns `prices` np.array with shape `num_items x num_days`.
-
         In some days, there are some items not available, so their prices will be NaN.
-
         :param float fillna: a float value to replace NaN. Defaults to 0.
         """
         x = self.prices_df.values
         x = np.repeat(x,repeats=7,axis=-1)[:, :self.calendar_df.shape[0]]
         assert x.shape == (self.num_items, self.num_days)
-        return x
+        return x.T
 
     def get_snap(self):
         """
@@ -148,9 +182,7 @@ class M5Data:
         """
         Returns a tensor with length `num_days` indicating whether there are
         special events on a particular day.
-
         There are 4 types of events: "Cultural", "National", "Religious", "Sporting".
-
         :param bool by_types: if True, returns a `num_days x 4` tensor indicating
             special event by type. Otherwise, only returns a `num_days x 1` tensor indicating
             whether there is a special event.
@@ -204,16 +236,36 @@ class M5Data:
         Chrismas.
         """
         cal = self.calendar_df.index.to_frame()
-        condition = (cal['date'].dt.day == 25) & (cal['date'].dt.month == 12)
+        condition = (cal['date'].dt.day == 24) & (cal['date'].dt.month == 12)
         christmas = condition.values[..., None]
         x = christmas.astype(int)
+        assert x.shape == (self.num_days, 1)
+        return x
+
+    def get_thanksgiving(self):
+        """
+        Returns a boolean 1D tensor with length `num_days` indicating if that day is
+        Chrismas.
+        """
+        cal = self.calendar_df.index.to_frame()
+        condition = (cal['date'].dt.dayofweek == 3) & (cal['date'].dt.month == 11) & (cal['date'].dt.day >= 22)
+        thanksgiving = condition.values[..., None]
+        x = thanksgiving.astype(int)
+        assert x.shape == (self.num_days, 1)
+        return x
+
+    def get_trend(self):
+        """
+        Returns a boolean 1D tensor with length `num_days` indicating if that day is
+        Chrismas.
+        """
+        x = trend(self.calendar_df)[...,None]
         assert x.shape == (self.num_days, 1)
         return x
 
     def get_aggregated_sales(self, state=True, store=True, cat=True, dept=True, item=True):
         """
         Returns aggregated sales at a particular aggregation level.
-
         The result will be a tensor with shape `num_timeseries x num_train_days`.
         """
         groups = []
@@ -239,7 +291,6 @@ class M5Data:
         """
         Returns aggregated "moving average" dollar sales at a particular aggregation level
         during the last 28 days.
-
         The result can be used as `weight` for evaluation metrics.
         """
         groups = []
@@ -310,7 +361,6 @@ class M5Data:
     def make_accuracy_submission(self, filename, prediction):
         """
         Makes submission file given prediction result.
-
         :param str filename: name of the submission file.
         :param np.array predicition: the prediction tensor with shape `num_items x 28`.
         """
@@ -325,7 +375,6 @@ class M5Data:
     def make_uncertainty_submission(self, filename, prediction):
         """
         Makes submission file given prediction result.
-
         :param str filename: name of the submission file.
         :param np.array predicition: the prediction tensor with shape
             `9 x num_aggregations x 28`. The first dimension indicates
@@ -342,6 +391,49 @@ class M5Data:
         assert df.shape[0] == prediction.shape[0] * 2
         df.iloc[:prediction.shape[0], :] = prediction
         df.to_csv(filename)
+
+def load_training_data(items, covariates=None):
+    """
+    Load sales for first item and covariates.
+    :return:
+    """
+    if covariates is None:
+        covariates = ['month']
+    data_path = r"data/"
+    m5 = M5Data(data_path)
+    sales = m5.get_sales()[items]
+    col_snap = [m5.states[x] for x in m5.list_states[items]]
+    calendar = m5.calendar_df.index.values[:sales.shape[-1]]
+    variables_set = ['price',
+                     'christmas',
+                     'dayofweek',
+                     'dayofmonth',
+                     'month',
+                     'snap',
+                     'event',
+                     'trend',
+                     'thanksgiving']
+    functions = [m5.get_prices,
+                 m5.get_christmas,
+                 m5.get_dummy_day_of_week,
+                 m5.get_dummy_day_of_month,
+                 m5.get_dummy_month_of_year,
+                 m5.get_snap,
+                 m5.get_event,
+                 m5.get_trend,
+                 m5.get_thanksgiving]
+    _ = dict(zip(variables_set, functions))
+    selected_variables = {k: _[k] for k in covariates}
+    data = [f() for f in list(selected_variables.values())]
+    filtered_data = [x[:sales.shape[-1], :] for x in data]
+    training_data = dict(zip(covariates, filtered_data))
+    training_data['sales'] = sales.T
+    if 'snap' in covariates:
+        training_data['snap'] = training_data['snap'][:, col_snap]
+    if 'price' in covariates:
+        training_data['price'] = training_data['price'][:, items]
+    return calendar, training_data
+
 
 
 # class BatchDataLoader:

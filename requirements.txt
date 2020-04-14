@@ -1,9 +1,10 @@
+numba
 pandas
 numpy
 matplotlib
 numpyro
 jax
 jaxlib
-pystan
-sklearn
-regex
+torch
+torchvision
+pyro-ppl
